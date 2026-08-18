@@ -159,6 +159,17 @@ has to pass every safety check -- pinning isn't a bypass) and `denylist`
 (never traded, no exceptions) are the two manual overrides left in the
 system, for a human to use deliberately rather than by default.
 
+**This isn't a theoretical justification** -- `backtest/backtest_all.py`
+(see "Judging a backtest" below) backtests SOL/BTC alongside whatever's
+currently discovery-eligible, and a real run turned up exactly the pattern
+the tier system exists for: two emerging-tier tokens both showed *far*
+larger best-case out-of-sample returns than SOL/BTC in the same window
+(+68% and +27%) but with drawdowns of -50% to -70% along the way, vs. -9%
+to -10% for SOL/BTC over the same period. Bigger edge and bigger tail risk,
+simultaneously, on the same tokens -- which is precisely why emerging-tier
+sizing is smaller rather than either "excluded" or "sized the same as a
+blue-chip."
+
 ## Current strategies (see `backtest/strategies.py`)
 
 - **`sma_crossover`** -- trend-following. Buys when a fast moving average
@@ -185,6 +196,12 @@ manage rather than ignore.
 
 ### Judging a backtest
 
+- **Run `backtest/backtest_all.py` periodically**, not just one-off
+  single-token runs -- it backtests everything currently eligible (plus
+  SOL/BTC) in one pass and is what surfaces cross-asset patterns like the
+  tier-risk one above. A single token's backtest can look fine in isolation
+  while missing that the *strategy itself* is currently underwater across
+  most of the live universe.
 - **Run `--walk-forward`, not just an in-sample run.** A strategy (or
   hand-tuned parameters) that only performs on the exact window it was
   fitted to is fitting noise, not finding an edge. `backtest/run_backtest.py

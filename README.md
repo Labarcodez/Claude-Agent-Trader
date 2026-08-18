@@ -37,6 +37,10 @@ signals.
 4. **Backtest before going live**:
    [`.claude/skills/backtest-strategy`](.claude/skills/backtest-strategy/SKILL.md)
    ```
+   python3 backtest/backtest_all.py          # everything currently eligible + SOL/BTC, one report
+   ```
+   or single-token:
+   ```
    python3 backtest/fetch_history.py --coin solana --days 180
    python3 backtest/run_backtest.py --coin solana --days 180 --strategy all --walk-forward
    ```
@@ -148,7 +152,8 @@ circuit-breaker recovery.
 | `.claude/skills/trade-cycle/` | The autonomous trading loop |
 | `.claude/skills/backtest-strategy/` | Strategy validation workflow |
 | `.claude/skills/paper-trade-cycle/` | Zero-risk simulated trading (full pipeline, no wallet needed) |
-| `backtest/` | Backtesting engine, strategies, CLI |
+| `backtest/` | Backtesting engine, strategies, single-token CLI |
+| `backtest/backtest_all.py` | Comprehensive backtest -- everything eligible + SOL/BTC, one ranked report |
 | `paper_trading/run_paper_cycle.py` | Paper-trading simulator (real pipeline, simulated fills) |
 | `tests/` | Unit tests (stdlib `unittest`) for strategies, engine, discovery logic |
 | `.github/workflows/tests.yml` | CI -- runs `tests/` on every push/PR |

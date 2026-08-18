@@ -29,6 +29,9 @@ and only trades ones that pass automated, on-chain-backed safety checks.
   this to validate changes and this session cannot run `trade-cycle` for
   real anyway (see rule 4).
 - `backtest/` -- a dependency-free Python backtesting engine + strategies.
+  `backtest_all.py` backtests everything currently discovery-eligible (plus
+  SOL/BTC) against every strategy in one pass -- prefer it for a real
+  cross-asset picture over one-off single-token runs.
 - `paper_trading/run_paper_cycle.py` -- the paper-trading simulator.
 - `tests/` -- unit tests (stdlib `unittest`) for the strategy math, engine
   mechanics, and discovery safety/tier logic. Run after touching

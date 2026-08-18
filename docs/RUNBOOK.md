@@ -17,17 +17,17 @@
    loose for your taste, adjust them there (and keep
    `research/discover_candidates.py`'s CLI defaults in sync -- see that
    file's docstring).
-4. Backtest, with `--walk-forward` to check for overfitting rather than
-   trusting a single in-sample run:
+4. Backtest everything currently eligible in one pass, with walk-forward to
+   check for overfitting rather than trusting a single in-sample run:
    ```
-   python3 backtest/fetch_history.py --coin solana --days 180
-   python3 backtest/run_backtest.py --coin solana --days 180 --strategy all --walk-forward
-   # repeat for bitcoin (the regime-filter reference coin), and for any
-   # currently-eligible discovered tokens that have a CoinGecko id
+   python3 backtest/backtest_all.py
    ```
    Only strategies with a non-negative **out-of-sample** result and low
    overfit risk should be relied on live (`docs/STRATEGY.md` "Judging a
-   backtest").
+   backtest"). Read the drawdown column too, not just returns -- expect
+   emerging-tier tokens to show much bigger drawdowns than SOL/BTC even when
+   "winning"; that's the evidence behind the tier sizing in
+   `config/discovery.yaml`, not just a theoretical caution.
 5. **Paper trade** before ever running the real thing -- this can even be
    done in a session with no Phantom MCP connection at all (see "Paper
    trading before going live" below).
