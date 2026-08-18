@@ -28,9 +28,45 @@
    Only strategies with a non-negative **out-of-sample** result and low
    overfit risk should be relied on live (`docs/STRATEGY.md` "Judging a
    backtest").
-5. Run one `trade-cycle` manually (ask Claude Code, in this repo, to run the
-   `trade-cycle` skill once) and read the journal entry it produces in
-   `journal/trades.jsonl` before automating anything.
+5. **Paper trade** before ever running the real thing -- this can even be
+   done in a session with no Phantom MCP connection at all (see "Paper
+   trading before going live" below).
+6. Run one real `trade-cycle` manually (ask Claude Code, in this repo, to
+   run the `trade-cycle` skill once) and read the journal entry it produces
+   in `journal/trades.jsonl` before automating anything.
+
+## Paper trading before going live
+
+`paper_trading/run_paper_cycle.py` runs the exact same discovery, regime
+filter, and strategy code the live agent uses, against real live market
+data, but simulates fills against `state/paper_portfolio.json` instead of
+calling any Phantom MCP write tool. No real money, no Phantom connection
+required.
+
+```
+python3 paper_trading/run_paper_cycle.py
+```
+
+First run creates a simulated $50 portfolio (or whatever `--starting-capital-usd`
+you pass). Run it again later and it picks up from where it left off. Run it
+repeatedly -- manually, or via `/loop .claude/skills/paper-trade-cycle` --
+to build an actual track record over days/weeks:
+
+- `journal/paper_trades.jsonl` accumulates every cycle's discovery stats,
+  actions, and portfolio value -- read it the same way you'd read the real
+  trade journal, per `journal/README.md`.
+- `state/paper_portfolio.json`'s `closed_trades` list gives you a real win
+  rate / return distribution to look at before trusting the live system.
+- Use `--reset` to wipe paper state and start fresh, e.g. after changing
+  `backtest/strategies.py` or `config/discovery.yaml`'s thresholds, so old
+  and new paper results don't mix.
+
+A short paper-trading run is weak evidence, the same way a short backtest
+window is -- treat a few days of paper cycles as "the pipeline didn't
+obviously break," not as proof of an edge. See
+`.claude/skills/paper-trade-cycle/SKILL.md` for what it simplifies vs. live
+trading (no real swap quote/slippage check, no daily cadence caps) before
+over-trusting its results.
 
 ## Running autonomously
 
@@ -52,7 +88,9 @@ it to run without you keeping a local session open.
 
 ## Monitoring
 
-- `journal/trades.jsonl` -- every cycle's decisions and actions.
+- `journal/trades.jsonl` -- every real cycle's decisions and actions.
+- `journal/paper_trades.jsonl` / `state/paper_portfolio.json` -- same, for
+  the paper-trading simulation (never mix these up with the real ones).
 - `state/circuit_breaker.json` -- current trip status and peak portfolio value.
 - Ask Claude at any time: "check the trading wallet status" -- it should read
   the journal + circuit breaker file + live Phantom balances and summarize.

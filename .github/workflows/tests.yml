@@ -1,0 +1,31 @@
+name: tests
+
+# Runs the deterministic unit test suite (tests/) on every push and PR.
+# Deliberately does NOT run backtest/discovery/paper-trading scripts here --
+# those hit real, rate-limited third-party APIs (CoinGecko, Jupiter,
+# RugCheck) and would make CI flaky and non-deterministic. Validate those
+# manually (see docs/RUNBOOK.md) or by running them yourself locally.
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        python-version: ["3.10", "3.11", "3.12"]
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python ${{ matrix.python-version }}
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+
+      - name: Byte-compile every Python file (catches syntax errors fast)
+        run: python -m py_compile $(git ls-files '*.py')
+
+      - name: Run unit tests
+        run: python -m unittest discover -s tests -v

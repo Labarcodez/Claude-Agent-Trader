@@ -11,6 +11,12 @@ research/results/
 # Remove this line if you deliberately want to version-control your trade log.
 journal/trades.jsonl
 
+# Paper-trading state/journal -- regenerates fresh on first run
+# (paper_trading/run_paper_cycle.py creates it automatically), and stays
+# local since it's a running simulation, not source.
+state/paper_portfolio.json
+journal/paper_trades.jsonl
+
 # state/circuit_breaker.json IS tracked (it ships with an initial
 # tripped:false state); it will show as locally modified once the agent
 # starts updating it. That's expected -- commit or not, your call.

@@ -42,8 +42,39 @@ signals.
    ```
    `--walk-forward` runs an out-of-sample train/test split and flags overfit
    risk -- prefer it over a plain in-sample run before trusting a result.
-5. **Run one trade cycle manually**, then automate:
+5. **Paper trade** the full pipeline with zero financial risk (works even
+   without Phantom connected):
+   [`.claude/skills/paper-trade-cycle`](.claude/skills/paper-trade-cycle/SKILL.md)
+   ```
+   python3 paper_trading/run_paper_cycle.py
+   ```
+   Run this repeatedly (e.g. via `/loop`) to build a real track record before
+   trusting the system with actual money.
+6. **Run one real trade cycle manually**, then automate:
    [`docs/RUNBOOK.md`](docs/RUNBOOK.md)
+
+## Testing
+
+```
+python3 -m unittest discover -s tests -v
+```
+
+Unit tests (stdlib `unittest`, no extra dependency) cover the strategy math,
+the backtest engine's simulation mechanics, and the discovery pipeline's
+safety/tier logic against synthetic and mocked data -- fast, deterministic,
+no network calls. They run automatically on every push/PR via
+[`.github/workflows/tests.yml`](.github/workflows/tests.yml). This is one
+layer of a four-layer validation approach, each catching a different kind of
+mistake before it costs real money:
+
+1. **Unit tests** -- is the arithmetic right? (e.g. does a fee actually
+   reduce the recorded return; does a flat/no-movement price series get
+   read as neutral instead of "overbought" -- an real edge case these tests
+   caught and fixed during development, see `backtest/strategies.py`'s `rsi()`)
+2. **Backtests** (`--walk-forward`) -- does a strategy have real, out-of-sample edge?
+3. **Paper trading** -- does the *whole pipeline* (discovery + regime +
+   sizing + risk) behave sensibly against live data, with simulated fills?
+4. **Live** -- real money, only after the first three build confidence.
 
 ## How it works
 
@@ -116,9 +147,14 @@ circuit-breaker recovery.
 | `research/discover_candidates.py` | Live token discovery + automated safety scoring |
 | `.claude/skills/trade-cycle/` | The autonomous trading loop |
 | `.claude/skills/backtest-strategy/` | Strategy validation workflow |
+| `.claude/skills/paper-trade-cycle/` | Zero-risk simulated trading (full pipeline, no wallet needed) |
 | `backtest/` | Backtesting engine, strategies, CLI |
+| `paper_trading/run_paper_cycle.py` | Paper-trading simulator (real pipeline, simulated fills) |
+| `tests/` | Unit tests (stdlib `unittest`) for strategies, engine, discovery logic |
+| `.github/workflows/tests.yml` | CI -- runs `tests/` on every push/PR |
 | `docs/PHANTOM_MCP_SETUP.md` | Wallet setup & funding |
 | `docs/STRATEGY.md` | Coin fundamentals, autonomous discovery, strategy/risk reasoning |
 | `docs/RUNBOOK.md` | Day-to-day operation |
-| `journal/` | Append-only trade log |
+| `journal/` | Append-only trade log (`trades.jsonl` real, `paper_trades.jsonl` simulated) |
 | `state/circuit_breaker.json` | Circuit breaker status |
+| `state/paper_portfolio.json` | Paper-trading simulated portfolio state |

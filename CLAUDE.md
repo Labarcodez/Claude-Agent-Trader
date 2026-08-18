@@ -24,16 +24,27 @@ and only trades ones that pass automated, on-chain-backed safety checks.
 - `.claude/skills/trade-cycle/` -- the autonomous discover-decide-execute loop.
 - `.claude/skills/backtest-strategy/` -- validates strategies before they're
   trusted live.
+- `.claude/skills/paper-trade-cycle/` -- runs the same pipeline against a
+  simulated portfolio, no Phantom connection or real money required. Use
+  this to validate changes and this session cannot run `trade-cycle` for
+  real anyway (see rule 4).
 - `backtest/` -- a dependency-free Python backtesting engine + strategies.
+- `paper_trading/run_paper_cycle.py` -- the paper-trading simulator.
+- `tests/` -- unit tests (stdlib `unittest`) for the strategy math, engine
+  mechanics, and discovery safety/tier logic. Run after touching
+  `backtest/strategies.py`, `backtest/engine.py`, or
+  `research/discover_candidates.py`: `python3 -m unittest discover -s tests -v`.
+  Also runs in CI (`.github/workflows/tests.yml`) on every push/PR.
 - `docs/STRATEGY.md` -- coin fundamentals, the autonomous discovery pipeline
   (with a real worked example), strategy and risk reasoning. Read this
   before changing discovery thresholds or strategy logic.
 - `docs/PHANTOM_MCP_SETUP.md` -- how to connect and fund the wallet (must be
   done locally; Phantom's auth needs a local browser).
-- `docs/RUNBOOK.md` -- day-to-day operation, monitoring, stopping, and
-  circuit-breaker recovery.
+- `docs/RUNBOOK.md` -- day-to-day operation, paper trading, monitoring,
+  stopping, and circuit-breaker recovery.
 - `journal/` -- append-only log of every trading decision (git-ignored by
-  default; it's live trading history, not source).
+  default; it's live trading history, not source). `trades.jsonl` is real,
+  `paper_trades.jsonl` is simulated -- never conflate the two.
 
 ## Ground rules for any agent (Claude) working in this repo
 
@@ -54,7 +65,9 @@ and only trades ones that pass automated, on-chain-backed safety checks.
 4. **This session (cloud/remote) cannot execute live trades.** Phantom's
    auth is a local browser flow. If asked to trade and no Phantom MCP tool
    is available, say so rather than fabricating wallet state -- see
-   `docs/PHANTOM_MCP_SETUP.md`.
+   `docs/PHANTOM_MCP_SETUP.md`. `paper-trade-cycle` IS runnable here (no
+   wallet needed) and is the right offer when someone wants to see the
+   system trade without local setup.
 5. **A strategy needs a non-negative, low-overfit-risk out-of-sample
    backtest on file before it trades live.** Run
    `.claude/skills/backtest-strategy` (with `--walk-forward`) after any
@@ -70,3 +83,9 @@ and only trades ones that pass automated, on-chain-backed safety checks.
    block changes, keep `research/discover_candidates.py`'s CLI defaults in
    sync (the script doesn't parse the YAML), and understand why each
    threshold exists per `docs/STRATEGY.md` before loosening it.
+8. **Run `python3 -m unittest discover -s tests -v` after touching any
+   logic in `backtest/` or `research/discover_candidates.py`, before
+   claiming the change works.** The test suite exists specifically because
+   this kind of code has non-obvious edge cases (see `backtest/strategies.py`'s
+   `rsi()` -- a flat/no-movement price series used to read as "overbought"
+   until a test caught it); don't reintroduce what it's already checking for.

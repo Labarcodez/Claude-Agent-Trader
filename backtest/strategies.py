@@ -31,6 +31,8 @@ def rsi(values: list[float], window: int = 14) -> float | None:
         losses.append(max(-delta, 0.0))
     avg_gain = sum(gains) / window
     avg_loss = sum(losses) / window
+    if avg_gain == 0 and avg_loss == 0:
+        return 50.0  # no price movement at all (e.g. a stale/illiquid feed) -- neutral, not "overbought"
     if avg_loss == 0:
         return 100.0
     rs = avg_gain / avg_loss
