@@ -1,0 +1,291 @@
+#!/usr/bin/env python3
+"""Dynamic Solana token discovery + automated safety scoring, stdlib only.
+
+Replaces a hand-maintained watchlist: pulls live candidates from Jupiter's
+Tokens API v2 (real trading interest, trending, newest pools), which already
+returns per-token on-chain audit data (mint/freeze authority, top-holder
+concentration, an "organic score" that filters out wash-traded/bot volume,
+and first-pool creation time for age) at zero extra cost -- then
+cross-checks survivors against RugCheck.xyz for one thing Jupiter's data
+doesn't cover: whether the mint has already been confirmed as a rug pull.
+
+All data sources are free, public, and require no API key -- but they're
+someone else's infrastructure with real rate limits, so this script is
+deliberately conservative about request volume: RugCheck is only called for
+candidates that already pass every check computed from Jupiter's own
+response, and everything backs off and retries once on a 429 rather than
+hammering the endpoint.
+
+See config/discovery.yaml for the human-readable version of these
+thresholds (keep the two in sync by hand -- this script does not parse that
+file, to stay dependency-free) and docs/STRATEGY.md "Autonomous discovery"
+for the reasoning and the empirical notes on what these APIs actually
+return (some fields are less trustworthy than they look -- documented
+there).
+
+Usage:
+    python3 research/discover_candidates.py
+    python3 research/discover_candidates.py --max-candidates 15 --min-liquidity-usd 300000
+"""
+from __future__ import annotations
+import argparse
+import json
+import sys
+import time
+import urllib.request
+import urllib.error
+from datetime import datetime, timezone
+from pathlib import Path
+
+JUPITER_BASE = "https://api.jup.ag/tokens/v2"
+RUGCHECK_BASE = "https://api.rugcheck.xyz/v1"
+DEXSCREENER_BASE = "https://api.dexscreener.com/latest/dex"
+USER_AGENT = "claude-agent-trader-discovery/1.0"
+
+RESULTS_DIR = Path(__file__).parent / "results"
+
+# Native SOL + Circle's Solana USDC -- settlement/base assets, not discovery
+# candidates. Kept here (not in discovery output) so they're never
+# accidentally excluded *or* re-evaluated as if they needed due diligence.
+CORE_ASSET_MINTS = {
+    "So11111111111111111111111111111111111111112",  # SOL
+    "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v",  # USDC
+}
+
+
+def _get_json(url: str, retries: int = 3, backoff: float = 2.0):
+    req = urllib.request.Request(url, headers={"User-Agent": USER_AGENT})
+    last_err = None
+    for attempt in range(retries):
+        try:
+            with urllib.request.urlopen(req, timeout=20) as resp:
+                return json.loads(resp.read().decode("utf-8"))
+        except urllib.error.HTTPError as e:
+            if e.code == 429:
+                time.sleep(backoff * (attempt + 1))
+                last_err = e
+                continue
+            if e.code == 404:
+                return None
+            last_err = e
+            break
+        except (urllib.error.URLError, TimeoutError) as e:
+            last_err = e
+            time.sleep(backoff)
+    print(f"  ! request failed: {url} ({last_err})", file=sys.stderr)
+    return None
+
+
+def fetch_jupiter_category(category: str, interval: str, limit: int) -> list[dict]:
+    return _get_json(f"{JUPITER_BASE}/{category}/{interval}?limit={limit}") or []
+
+
+def fetch_jupiter_recent(limit: int) -> list[dict]:
+    return _get_json(f"{JUPITER_BASE}/recent?limit={limit}") or []
+
+
+def fetch_rugcheck_report(mint: str) -> dict | None:
+    return _get_json(f"{RUGCHECK_BASE}/tokens/{mint}/report")
+
+
+def fetch_dexscreener_best_solana_pair(mint: str) -> dict | None:
+    data = _get_json(f"{DEXSCREENER_BASE}/tokens/{mint}")
+    pairs = [p for p in (data or {}).get("pairs") or [] if p.get("chainId") == "solana"]
+    if not pairs:
+        return None
+    return max(pairs, key=lambda p: (p.get("liquidity") or {}).get("usd", 0) or 0)
+
+
+def gather_candidates(args) -> dict[str, dict]:
+    """Returns {mint: jupiter_token_data}, deduped across sources, core assets excluded."""
+    candidates: dict[str, dict] = {}
+
+    if not args.no_organic:
+        for interval in ("6h", "24h"):
+            for tok in fetch_jupiter_category("toporganicscore", interval, args.limit_per_source):
+                candidates.setdefault(tok["id"], tok)
+
+    if not args.no_trending:
+        for interval in ("1h", "6h"):
+            for tok in fetch_jupiter_category("toptrending", interval, args.limit_per_source):
+                candidates.setdefault(tok["id"], tok)
+
+    if not args.no_recent:
+        for tok in fetch_jupiter_recent(args.limit_per_source):
+            candidates.setdefault(tok["id"], tok)
+
+    for mint in CORE_ASSET_MINTS:
+        candidates.pop(mint, None)
+
+    return candidates
+
+
+def _pool_age_hours(first_pool: dict | None) -> float | None:
+    if not first_pool or not first_pool.get("createdAt"):
+        return None
+    try:
+        created = datetime.fromisoformat(first_pool["createdAt"].replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    return (datetime.now(timezone.utc) - created).total_seconds() / 3600
+
+
+def classify_tier(mcap: float, holder_count: int, is_verified: bool, args) -> str:
+    if mcap >= args.blue_chip_mcap_usd and holder_count >= args.blue_chip_holder_count and is_verified:
+        return "blue_chip"
+    if mcap >= args.established_mcap_usd and holder_count >= args.established_holder_count:
+        return "established"
+    return "emerging"  # includes memecoins and other newer/smaller tokens that still pass every safety check
+
+
+def evaluate_candidate(mint: str, tok: dict, args) -> dict:
+    """Two-stage check: (1) everything computable from Jupiter's own response
+    for free, (2) RugCheck's `rugged` flag -- but only spent on candidates
+    that already survive stage 1, to keep request volume down."""
+    reasons_fail: list[str] = []
+    symbol = tok.get("symbol", "?")
+    liquidity = tok.get("liquidity") or 0
+    holders = tok.get("holderCount") or 0
+    mcap = tok.get("mcap") or tok.get("fdv") or 0
+    audit = tok.get("audit") or {}
+    organic_score = tok.get("organicScore")
+    top_holder_pct = audit.get("topHoldersPercentage")
+    pool_age_hours = _pool_age_hours(tok.get("firstPool"))
+
+    if liquidity < args.min_liquidity_usd:
+        reasons_fail.append(f"liquidity ${liquidity:,.0f} < min ${args.min_liquidity_usd:,.0f}")
+    if holders < args.min_holder_count:
+        reasons_fail.append(f"holderCount {holders} < min {args.min_holder_count}")
+    if organic_score is None:
+        reasons_fail.append("no organicScore reported -- can't confirm real (non-wash-traded) demand")
+    elif organic_score < args.min_organic_score:
+        reasons_fail.append(f"organicScore {organic_score:.1f} < min {args.min_organic_score}")
+    if args.require_mint_renounced and not audit.get("mintAuthorityDisabled"):
+        reasons_fail.append("mint authority not disabled (deployer can still mint new supply)")
+    if args.require_freeze_renounced and not audit.get("freezeAuthorityDisabled"):
+        reasons_fail.append("freeze authority not disabled (deployer can still freeze holder accounts)")
+    if top_holder_pct is not None and top_holder_pct > args.max_top_holder_pct:
+        reasons_fail.append(f"top holder owns {top_holder_pct:.1f}% of supply > max {args.max_top_holder_pct}%")
+    if pool_age_hours is None:
+        reasons_fail.append("no first-pool creation time reported -- can't confirm token age")
+    elif pool_age_hours < args.min_pool_age_hours:
+        reasons_fail.append(f"pool age {pool_age_hours:.1f}h < min {args.min_pool_age_hours}h")
+
+    rug_rugged = None
+    rug_risks: list[str] = []
+    if not reasons_fail or args.always_rugcheck:
+        time.sleep(args.request_delay)
+        rug = fetch_rugcheck_report(mint)
+        if rug is None:
+            reasons_fail.append("RugCheck unavailable -- fail-safe reject rather than trade unconfirmed")
+        else:
+            rug_rugged = rug.get("rugged")
+            if rug_rugged:
+                reasons_fail.append("RugCheck flags this mint as an already-confirmed rug")
+            for r in rug.get("risks") or []:
+                if isinstance(r, dict) and str(r.get("level", "")).lower() in ("danger", "critical", "high"):
+                    name = r.get("name") or r.get("description") or str(r)
+                    rug_risks.append(name)
+                    reasons_fail.append(f"RugCheck risk flag: {name}")
+
+    dex_pair = None
+    if args.cross_check_dexscreener and not reasons_fail:
+        time.sleep(args.request_delay)
+        dex_pair = fetch_dexscreener_best_solana_pair(mint)
+        if dex_pair:
+            dex_liq = (dex_pair.get("liquidity") or {}).get("usd", 0) or 0
+            if dex_liq < args.min_liquidity_usd * 0.5:  # allow some divergence between sources before treating it as a red flag
+                reasons_fail.append(f"DexScreener liquidity ${dex_liq:,.0f} diverges sharply below Jupiter's ${liquidity:,.0f}")
+
+    is_verified = bool(tok.get("isVerified")) and audit.get("mintAuthorityDisabled") and audit.get("freezeAuthorityDisabled")
+    tier = classify_tier(mcap, holders, is_verified, args) if not reasons_fail else None
+
+    return {
+        "mint": mint,
+        "symbol": symbol,
+        "eligible": len(reasons_fail) == 0,
+        "tier": tier,
+        "reasons_fail": reasons_fail,
+        "data": {
+            "liquidity_usd": liquidity,
+            "holder_count": holders,
+            "mcap_usd": mcap,
+            "organic_score": organic_score,
+            "organic_score_label": tok.get("organicScoreLabel"),
+            "top_holder_pct": top_holder_pct,
+            "pool_age_hours": pool_age_hours,
+            "mint_authority_disabled": audit.get("mintAuthorityDisabled"),
+            "freeze_authority_disabled": audit.get("freezeAuthorityDisabled"),
+            "jupiter_is_verified": tok.get("isVerified"),
+            "tags": tok.get("tags"),
+            "rugcheck_rugged": rug_rugged,
+            "rugcheck_risk_flags": rug_risks,
+            "dexscreener_cross_checked": dex_pair is not None,
+        },
+    }
+
+
+def main():
+    ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    ap.add_argument("--max-candidates", type=int, default=20,
+                     help="Cap on unique candidates evaluated per run (be a good citizen to free APIs)")
+    ap.add_argument("--limit-per-source", type=int, default=10)
+    ap.add_argument("--request-delay", type=float, default=0.4, help="Seconds between RugCheck/DexScreener calls")
+    ap.add_argument("--no-organic", action="store_true", help="Skip the toporganicscore source")
+    ap.add_argument("--no-trending", action="store_true", help="Skip the toptrending source")
+    ap.add_argument("--no-recent", action="store_true", help="Skip the recent-pools source")
+    ap.add_argument("--always-rugcheck", action="store_true",
+                     help="Call RugCheck even for candidates that already fail Jupiter's checks (uses more requests)")
+    ap.add_argument("--cross-check-dexscreener", dest="cross_check_dexscreener", action="store_true", default=True)
+    ap.add_argument("--no-cross-check-dexscreener", dest="cross_check_dexscreener", action="store_false")
+    # Safety thresholds -- keep in sync with config/discovery.yaml's `safety` block
+    ap.add_argument("--min-liquidity-usd", type=float, default=250_000)
+    ap.add_argument("--min-holder-count", type=int, default=500)
+    ap.add_argument("--min-pool-age-hours", type=float, default=72)
+    ap.add_argument("--min-organic-score", type=float, default=40)
+    ap.add_argument("--max-top-holder-pct", type=float, default=20.0)
+    ap.add_argument("--require-mint-renounced", dest="require_mint_renounced", action="store_true", default=True)
+    ap.add_argument("--allow-mint-authority", dest="require_mint_renounced", action="store_false")
+    ap.add_argument("--require-freeze-renounced", dest="require_freeze_renounced", action="store_true", default=True)
+    ap.add_argument("--allow-freeze-authority", dest="require_freeze_renounced", action="store_false")
+    # Tier thresholds -- keep in sync with config/discovery.yaml's `tiers` block
+    ap.add_argument("--blue-chip-mcap-usd", type=float, default=50_000_000)
+    ap.add_argument("--blue-chip-holder-count", type=int, default=10_000)
+    ap.add_argument("--established-mcap-usd", type=float, default=5_000_000)
+    ap.add_argument("--established-holder-count", type=int, default=2_000)
+    args = ap.parse_args()
+
+    print("Gathering candidates from Jupiter Tokens API v2...")
+    candidates = gather_candidates(args)
+    mints = list(candidates.keys())[: args.max_candidates]
+    print(f"{len(candidates)} unique candidates found (deduped across sources); evaluating top {len(mints)} (--max-candidates).\n")
+
+    eligible, rejected = [], []
+    for i, mint in enumerate(mints, 1):
+        tok = candidates[mint]
+        print(f"  [{i}/{len(mints)}] {tok.get('symbol', '?'):>10}  {mint}")
+        result = evaluate_candidate(mint, tok, args)
+        (eligible if result["eligible"] else rejected).append(result)
+
+    RESULTS_DIR.mkdir(parents=True, exist_ok=True)
+    out_path = RESULTS_DIR / f"discovery_{datetime.now(timezone.utc).strftime('%Y%m%dT%H%M%SZ')}.json"
+    out_path.write_text(json.dumps({"eligible": eligible, "rejected": rejected}, indent=2))
+
+    print(f"\n{'=' * 60}\nELIGIBLE ({len(eligible)}):")
+    for r in eligible:
+        d = r["data"]
+        print(f"  {r['symbol']:>10}  tier={r['tier']:<10} liq=${d['liquidity_usd']:>12,.0f}  "
+              f"holders={d['holder_count']:>7}  organic={d['organic_score']}  mint={r['mint']}")
+
+    print(f"\nREJECTED ({len(rejected)}):")
+    for r in rejected:
+        print(f"  {r['symbol']:>10}  {'; '.join(r['reasons_fail'][:2])}")
+
+    print(f"\nFull report (all fields, all reasons) saved to {out_path}")
+    print("\nEligible tokens are candidates for the trade-cycle skill's signal step, not")
+    print("automatic buys -- position sizing/risk checks in config/risk.yaml still apply,")
+    print("and this script's output should still be spot-checked, not trusted blindly.")
+
+
+if __name__ == "__main__":
+    main()

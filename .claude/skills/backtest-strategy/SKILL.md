@@ -5,12 +5,18 @@ description: Fetch historical price data and backtest the trading strategies in 
 
 # Backtest a strategy
 
-1. Pick the CoinGecko coin id(s) to test, matched to `config/watchlist.yaml`
-   (e.g. `solana`, `jupiter-exchange-solana`, `pyth-network`,
-   `jito-governance-token`, `raydium`, and any meme-category tokens added).
-   Include `bitcoin` too -- it's the regime-filter reference coin
-   (`config/risk.yaml`'s `regime_reference_coin`), so it's worth knowing how
-   the filter would have behaved over the same window you're backtesting.
+1. Pick the CoinGecko coin id(s) to test. There's no fixed list anymore
+   (see `research/discover_candidates.py`) -- use whatever's currently
+   eligible in the latest `research/results/discovery_*.json` (map each
+   symbol to a CoinGecko id via the CoinGecko `search-coins` tool if one
+   isn't obvious), plus `bitcoin` always -- it's the regime-filter reference
+   coin (`config/risk.yaml`'s `regime_reference_coin`), so it's worth knowing
+   how the filter would have behaved over the same window you're
+   backtesting. **Emerging-tier tokens are often too new to be on CoinGecko
+   at all** -- if `fetch_history.py` can't find a coin id, that token simply
+   can't be backtested yet; trade it (if at all) per
+   `.claude/skills/trade-cycle/SKILL.md` step 6's no-history sizing rule
+   rather than skipping it outright.
 2. Fetch history (skip if a recent cache file already exists in
    `backtest/cache/`):
    ```

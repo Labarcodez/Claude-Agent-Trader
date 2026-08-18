@@ -1,6 +1,7 @@
-# Regenerable backtest artifacts -- don't commit stale/misleading data
+# Regenerable backtest/discovery artifacts -- don't commit stale/misleading data
 backtest/cache/
 backtest/results/
+research/results/
 
 # Local Phantom MCP session (wallet session keys) must NEVER be committed
 .phantom-mcp/

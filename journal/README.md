@@ -16,14 +16,22 @@ One JSON object per line:
   "cycle_id": "c-000123",
   "portfolio_value_usd": 54.20,
   "positions_before": {"SOL": 0.31, "USDC": 12.0},
+  "discovery": {
+    "candidates_found": 47,
+    "eligible": 3,
+    "rejected_sample": [{"symbol": "USDT", "reason": "mint authority not disabled"}]
+  },
   "signals": [
-    {"symbol": "JUP", "strategy": "sma_crossover", "signal": "buy", "reason": "fast SMA(10) crossed above slow SMA(30); RSI 58 (not overbought); 24h volume $x above min_liquidity_usd"}
+    {"symbol": "JUP", "strategy": "adaptive_ensemble", "signal": "buy", "reason": "trending regime; fast SMA(10) crossed above slow SMA(30); volatility breakout confirmed"}
   ],
   "risk_checks": {
     "enabled": true,
     "circuit_breaker_tripped": false,
-    "watchlist_ok": true,
+    "regime": "trending",
+    "discovery_eligible": true,
+    "tier": "blue_chip",
     "position_size_usd": 14.50,
+    "portfolio_heat_pct": 0.08,
     "within_caps": true
   },
   "action": {

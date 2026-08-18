@@ -1,0 +1,75 @@
+# Dynamic token discovery pipeline. This REPLACES a hand-maintained token
+# list: every trade-cycle, the agent asks live data sources "what's worth
+# looking at right now" and runs every candidate through automated,
+# on-chain-backed safety checks before it's ever eligible to trade -- no
+# human has to add a token by name first. Two exceptions: `pinned_candidates`
+# (always considered) and `denylist` (never traded, no matter what).
+#
+# Reference implementation: research/discover_candidates.py -- this file's
+# `safety` and `tiers` values should match that script's CLI defaults; if you
+# change one, change the other. Reasoning and a real worked example (live
+# run output, including why it rejected USDT and several memecoins) are in
+# docs/STRATEGY.md "Autonomous discovery".
+
+enabled: true
+
+sources:
+  jupiter_top_organic_score:
+    enabled: true
+    intervals: ["6h", "24h"]     # "organic" = filtered for wash-traded/bot volume, i.e. real trader interest
+    limit_per_interval: 10
+  jupiter_top_trending:
+    enabled: true
+    intervals: ["1h", "6h"]
+    limit_per_interval: 10
+  jupiter_recent:
+    enabled: true
+    limit: 10                    # newest pools -- highest-risk source; the pool-age gate below is what keeps this safe to include
+
+max_candidates_per_cycle: 20     # cap on unique candidates fully evaluated per run -- be a good citizen to free public APIs
+
+# Always considered as candidates regardless of whether live discovery
+# surfaces them this cycle. Use this for a token you specifically want kept
+# in rotation (still has to pass every safety check below every time -- this
+# is not a bypass) and for any open position, so it never "falls off" and
+# becomes impossible for the agent to reason about exiting.
+pinned_candidates: []   # e.g. ["JUPyiwrYJFskUPiHa7hkeR8VUtAeFoSYbKedZNsDvCN"]
+
+# Tokens that must NEVER be traded even if they'd otherwise pass every
+# automated check -- a manual override for anything you have specific reason
+# to distrust (e.g. a token that later turns out to be a rug the automated
+# checks didn't catch, or a token you just don't want the agent touching).
+denylist: []
+
+# ---- Automated safety thresholds (ALL must pass; mirrors the script's
+# argparse defaults) ---------------------------------------------------------
+safety:
+  min_liquidity_usd: 250000
+  min_holder_count: 500
+  min_organic_score: 40          # Jupiter's own organicScore (0-100ish); below this, volume looks bot/wash-traded rather than real demand
+  min_pool_age_hours: 72         # reject anything with a pool younger than 3 days -- the highest-risk rug window
+  max_top_holder_pct: 20.0       # single largest non-team holder's share of supply, from Jupiter's audit.topHoldersPercentage
+  require_mint_authority_disabled: true    # Jupiter's audit.mintAuthorityDisabled must be true
+  require_freeze_authority_disabled: true  # Jupiter's audit.freezeAuthorityDisabled must be true
+  require_rugcheck_not_rugged: true        # cross-check via RugCheck.xyz -- the one thing Jupiter's own data doesn't cover
+  reject_rugcheck_danger_risks: true       # any RugCheck risk flag at danger/critical/high level is disqualifying
+
+# ---- Risk tiers (computed live from each candidate's own data, never
+# hand-labeled) --------------------------------------------------------------
+# Sizing multipliers apply on top of config/risk.yaml's max_position_fraction
+# etc. "emerging" is the catch-all for anything that passes every safety
+# check above but isn't large/established yet -- this is where memecoins
+# land. They are IN SCOPE, sized smaller for their variance, not excluded.
+tiers:
+  blue_chip:
+    min_mcap_usd: 50000000
+    min_holder_count: 10000
+    require_jupiter_verified: true
+    position_fraction_multiplier: 1.0
+  established:
+    min_mcap_usd: 5000000
+    min_holder_count: 2000
+    position_fraction_multiplier: 0.7
+  emerging:
+    position_fraction_multiplier: 0.4
+    max_concurrent_positions: 2    # analogous to the old max_meme_positions -- applies within this tier specifically

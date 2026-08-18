@@ -4,22 +4,31 @@
 
 1. Follow `docs/PHANTOM_MCP_SETUP.md` end to end (local machine, browser
    auth, fund the agent's wallet with your $50).
-2. Verify every mint address in `config/watchlist.yaml` against an
-   authoritative source before trusting it (see `docs/STRATEGY.md`'s
-   due-diligence checklist) -- the addresses shipped in this repo were
-   researched carefully but you are the one funding the wallet; re-verify.
-3. Run backtests for each watchlist token, with `--walk-forward` to check for
-   overfitting rather than trusting a single in-sample run:
+2. Verify SOL and USDC's mint addresses in `config/core_assets.yaml` against
+   an authoritative source before trusting them -- these are the only two
+   tokens not covered by live discovery's automated checks.
+3. Try discovery on its own first, to see the safety pipeline working before
+   any money is at stake:
+   ```
+   python3 research/discover_candidates.py
+   ```
+   Read the eligible/rejected output and skim a few of the rejection reasons
+   -- if the thresholds in `config/discovery.yaml` feel too strict or too
+   loose for your taste, adjust them there (and keep
+   `research/discover_candidates.py`'s CLI defaults in sync -- see that
+   file's docstring).
+4. Backtest, with `--walk-forward` to check for overfitting rather than
+   trusting a single in-sample run:
    ```
    python3 backtest/fetch_history.py --coin solana --days 180
    python3 backtest/run_backtest.py --coin solana --days 180 --strategy all --walk-forward
-   # repeat for jupiter-exchange-solana, pyth-network, jito-governance-token, raydium,
-   # bitcoin (the regime-filter reference coin), and any meme-category tokens you enable
+   # repeat for bitcoin (the regime-filter reference coin), and for any
+   # currently-eligible discovered tokens that have a CoinGecko id
    ```
    Only strategies with a non-negative **out-of-sample** result and low
    overfit risk should be relied on live (`docs/STRATEGY.md` "Judging a
    backtest").
-4. Run one `trade-cycle` manually (ask Claude Code, in this repo, to run the
+5. Run one `trade-cycle` manually (ask Claude Code, in this repo, to run the
    `trade-cycle` skill once) and read the journal entry it produces in
    `journal/trades.jsonl` before automating anything.
 

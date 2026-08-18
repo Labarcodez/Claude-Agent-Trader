@@ -86,14 +86,19 @@ regime_sma_window_days: 30
 
 # ---- Correlation / concentration guardrails ---------------------------------------
 max_non_stable_exposure_fraction: 0.70   # keep some USDC buffer at all times
-max_meme_positions: 2                    # meme coins are in scope, not excluded -- capped for correlated-liquidity-loss risk, not on principle
-max_same_ecosystem_positions: 3          # e.g. don't hold 3 different Solana-DeFi tokens that all just track SOL beta
+max_emerging_tier_positions: 2           # "emerging" tier includes memecoins -- in scope, capped for correlated-liquidity-loss risk, not on principle
+max_same_ecosystem_positions: 3          # e.g. don't hold 3 different tokens that all just track the same underlying beta
 
-# ---- Token safety gate ---------------------------------------------------------
-# A token must (a) appear in config/watchlist.yaml, (b) have verified: true
-# there (see that file's header), and (c) pass the live liquidity/volume
-# re-check every cycle, before it can ever be bought. New candidates can be
-# researched and *proposed* (logged), never traded, until a human adds them
-# with verified: true.
-require_watchlist_membership: true
-require_verified_flag: true
+# ---- Token discovery & safety gate ----------------------------------------------
+# There is no hand-maintained token list. A token is only ever tradeable if:
+#   (a) it's SOL or USDC (config/core_assets.yaml), OR
+#   (b) it was returned as `"eligible": true` by the most recent
+#       research/discover_candidates.py run (see config/discovery.yaml for the
+#       thresholds it enforces -- liquidity, holder count, organic trading
+#       volume, mint/freeze authority, pool age, RugCheck rug-history check),
+#       AND it is not on config/discovery.yaml's `denylist`.
+# New candidates that fail discovery are logged as rejected (with the
+# specific reason) in the journal, never traded. See docs/STRATEGY.md
+# "Autonomous discovery" for the full reasoning and a real worked example.
+require_discovery_pass: true
+max_discovery_result_age_hours: 6   # re-run discovery if the latest research/results/discovery_*.json is older than this

@@ -2,22 +2,32 @@
 
 An autonomous Solana trading agent, controlled through Claude Code + Phantom's
 MCP server. It trades a small, deliberately-at-risk account (~$50) toward
-growing that balance over time, using backtested strategies and hard risk
-limits.
+growing that balance over time, using live token discovery, backtested
+strategies, and hard risk limits. There is no hand-maintained token list --
+the agent finds its own coins every cycle via `research/discover_candidates.py`
+and only trades ones that pass automated, on-chain-backed safety checks.
 
 ## What this project is
 
 - `.mcp.json` -- registers Phantom's official MCP server (`@phantom/mcp-server`).
 - `config/risk.yaml` -- the risk/kill-switch config. **Read this before doing
   anything else with the wallet.**
-- `config/watchlist.yaml` -- the only tokens the agent may trade.
-- `.claude/skills/trade-cycle/` -- the autonomous decide-and-execute loop.
+- `config/core_assets.yaml` -- SOL/USDC, the only tokens exempt from live
+  discovery (they're the settlement assets, not a trading candidate list).
+- `config/discovery.yaml` -- discovery sources, automated safety thresholds,
+  risk tiers, and the `pinned_candidates`/`denylist` manual overrides.
+- `research/discover_candidates.py` -- pulls live candidates from Jupiter's
+  Tokens API, filters them through on-chain safety checks, cross-checks
+  survivors against RugCheck.xyz. This is what "the agent finds its own
+  coins" means concretely -- read it before assuming a token needs to be
+  added anywhere by hand.
+- `.claude/skills/trade-cycle/` -- the autonomous discover-decide-execute loop.
 - `.claude/skills/backtest-strategy/` -- validates strategies before they're
   trusted live.
 - `backtest/` -- a dependency-free Python backtesting engine + strategies.
-- `docs/STRATEGY.md` -- coin fundamentals, due-diligence checklist, strategy
-  and risk reasoning. Read this before adding a token to the watchlist or
-  changing strategy logic.
+- `docs/STRATEGY.md` -- coin fundamentals, the autonomous discovery pipeline
+  (with a real worked example), strategy and risk reasoning. Read this
+  before changing discovery thresholds or strategy logic.
 - `docs/PHANTOM_MCP_SETUP.md` -- how to connect and fund the wallet (must be
   done locally; Phantom's auth needs a local browser).
 - `docs/RUNBOOK.md` -- day-to-day operation, monitoring, stopping, and
@@ -32,11 +42,12 @@ limits.
    `send_solana_transaction`, `portfolio_rebalance`, etc.) without first
    checking `enabled: true` and `state/circuit_breaker.json`'s `tripped`
    status, per `.claude/skills/trade-cycle/SKILL.md`.
-2. **Never trade a token that isn't on `config/watchlist.yaml` AND marked
-   `verified: true` there.** New candidates -- including memecoins, which
-   are explicitly in scope -- get proposed in the journal for a human to add
-   and verify, not traded directly. See `docs/STRATEGY.md`'s due-diligence
-   checklist.
+2. **Never trade a token that isn't SOL/USDC or wasn't `eligible: true` in
+   the current cycle's `research/discover_candidates.py` output**, and never
+   trade anything on `config/discovery.yaml`'s `denylist` regardless of what
+   discovery says. Memecoins are explicitly in scope -- they go through the
+   same automated gate, sized smaller via the `emerging` tier, not excluded.
+   See `docs/STRATEGY.md`'s "Autonomous discovery".
 3. **Never commit wallet secrets.** `~/.phantom-mcp/session.json` lives
    outside this repo and must stay there; `.gitignore` also blocks any
    `session.json` and the local `.phantom-mcp/` dir from being added here.
@@ -44,12 +55,18 @@ limits.
    auth is a local browser flow. If asked to trade and no Phantom MCP tool
    is available, say so rather than fabricating wallet state -- see
    `docs/PHANTOM_MCP_SETUP.md`.
-5. **A strategy needs a non-negative backtest on file before it trades live.**
-   Run `.claude/skills/backtest-strategy` after any change to
-   `backtest/strategies.py` or before enabling a new one in
-   `trade-cycle`.
-6. **Log every cycle, including holds.** `journal/trades.jsonl` is the audit
-   trail and debugging tool; a gap in it is a blind spot.
-7. **Mint addresses are high-stakes typos.** Verify any new token's mint
-   address against an authoritative source before adding it to
-   `config/watchlist.yaml` -- see `docs/STRATEGY.md`.
+5. **A strategy needs a non-negative, low-overfit-risk out-of-sample
+   backtest on file before it trades live.** Run
+   `.claude/skills/backtest-strategy` (with `--walk-forward`) after any
+   change to `backtest/strategies.py` or before enabling a new one in
+   `trade-cycle`. A specific token with no backtestable price history
+   (common for freshly-discovered tokens) can still trade, but only at
+   minimum size -- see `trade-cycle/SKILL.md` step 6.
+6. **Log every cycle, including holds and rejected discovery candidates.**
+   `journal/trades.jsonl` is the audit trail and debugging tool; a gap in it
+   is a blind spot.
+7. **Discovery thresholds are a safety boundary, not a suggestion to tune
+   looser for more opportunities.** If `config/discovery.yaml`'s `safety`
+   block changes, keep `research/discover_candidates.py`'s CLI defaults in
+   sync (the script doesn't parse the YAML), and understand why each
+   threshold exists per `docs/STRATEGY.md` before loosening it.

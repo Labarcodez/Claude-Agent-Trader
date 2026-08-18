@@ -1,8 +1,8 @@
 # Strategy, risk, and coin fundamentals
 
 This is the reference the `trade-cycle` skill leans on for *why*, not just
-*what*. Read this before changing `config/risk.yaml`, adding to
-`config/watchlist.yaml`, or trusting a new strategy live.
+*what*. Read this before changing `config/risk.yaml`, `config/discovery.yaml`,
+or trusting a new strategy live.
 
 ## The core problem with a $50 account
 
@@ -17,84 +17,147 @@ slippage by default specifically to stress-test that.
 
 ## Coin fundamentals -- what actually matters
 
-When looking at any token (watchlisted or a new candidate), these are the
-signals that matter, roughly in order:
+When looking at any token, discovered or pinned, these are the signals that
+matter, roughly in order -- and each one maps directly to an automated check
+in `research/discover_candidates.py` (see "Autonomous discovery" below for
+exactly how):
 
 1. **Liquidity** (depth of the on-chain trading pool, e.g. on Raydium/Orca/
    Jupiter routes). Low liquidity means large price impact on even small
    trades, and means a rug/exit-scam can drain the pool instantly. This repo
    hard-gates on `min_liquidity_usd` for a reason.
-2. **Volume vs. market cap**. Extremely high volume relative to market cap
-   can mean wash trading (fake volume to look legitimate) -- be suspicious of
-   volume that's a large multiple of market cap sustained over days.
+2. **Real vs. wash-traded volume**. High volume relative to market cap can
+   mean wash trading (fake volume to look legitimate). Jupiter's `organicScore`
+   -- built by filtering out bot/wash-trade patterns -- is a much sharper tool
+   for this than eyeballing a volume/mcap ratio.
 3. **Mint & freeze authority** (Solana-specific). A token where the deployer
    still holds mint authority can print unlimited new supply and dump on
-   holders; freeze authority lets them freeze your tokens. Reputable,
-   established tokens (SOL, USDC, JUP, JTO, PYTH, RAY) have these
-   renounced/controlled appropriately. Check via a Solana explorer or RPC
-   `getAccountInfo` on the mint before ever adding a new token to the
-   watchlist.
+   holders; freeze authority lets them freeze your tokens. This is a hard,
+   automated gate (`audit.mintAuthorityDisabled` / `audit.freezeAuthorityDisabled`
+   from Jupiter's Tokens API) -- it isn't optional even for a token that
+   otherwise looks great, and notably it isn't just a memecoin problem: see
+   the worked example below, where the pipeline correctly rejected USDT for
+   exactly this reason.
 4. **Holder concentration**. If a handful of wallets hold a large majority
-   of supply, a single wallet dumping can crater price. Check top-holder
-   distribution before adding a new token.
-5. **Age & track record**. A token with months/years of continuous trading
-   history and multiple market cycles survived is safer than a token that
-   launched last week, all else equal -- new tokens are where most rugs and
-   pump-and-dumps happen.
-6. **What the token actually is**. Understand the project: is it a
-   real-usage token (a DEX's governance token, an oracle network, a staking
-   protocol) or a pure attention/meme token with no underlying activity?
-   Both can be traded, but meme tokens get smaller position-size multipliers
-   in `config/watchlist.yaml` because their liquidity and price can evaporate
-   far faster.
+   of supply, a single wallet dumping can crater price. Automated via
+   Jupiter's `audit.topHoldersPercentage`.
+5. **Age & track record**. A token whose pool has survived days/weeks/months
+   is safer than one that launched hours ago, all else equal -- most rugs and
+   pump-and-dumps happen in the first hours to days. Automated via
+   `firstPool.createdAt`.
+6. **What the token actually is**. A real-usage token (a DEX's governance
+   token, an oracle network) and a pure attention/meme token can both be
+   traded -- what differs is how they're sized, via the tier system below,
+   not whether they're eligible at all.
 
-### Due-diligence checklist (must pass ALL before adding a token to the watchlist)
+## Autonomous discovery
 
-- [ ] Liquidity >= `min_liquidity_usd` sustained over the last 7+ days, not a spike
-- [ ] Volume/market-cap ratio not wildly anomalous vs. comparable tokens
-- [ ] Mint authority renounced or held by a known, reputable program/multisig
-- [ ] Freeze authority renounced (or acceptable for a known reason, e.g. a
-      regulated stablecoin issuer)
-- [ ] Top 10 non-exchange, non-liquidity-pool holders don't control an
-      outsized share of supply
-- [ ] Token/project has a real, checkable identity (website, docs, audits if
-      a DeFi protocol) -- not just a ticker and a Telegram group
-- [ ] Mint address verified against an authoritative source (the project's
-      own docs/site, or Jupiter's token list), not just copied from a chat or
-      search result -- **impersonator tokens with similar names/tickers are
-      extremely common on Solana**
+There is no hand-maintained token list in this project. `config/watchlist.yaml`
+existed early on and was deliberately removed -- a static list either goes
+stale (missing real opportunities) or becomes a bottleneck requiring a human
+to add every token by hand, which defeats the point of an autonomous agent.
+Instead, `research/discover_candidates.py` runs live, every cycle (or reuses
+a recent run within `config/risk.yaml`'s `max_discovery_result_age_hours`),
+and does two things: **finds** candidates worth looking at, and **filters**
+them down to only the ones that pass automated, on-chain-backed safety
+checks. Nothing is tradeable unless it clears the filter -- discovery finding
+a token is necessary, not sufficient.
 
-A token that fails any box gets logged as a rejected proposal in the journal,
-not added to the watchlist, and never traded -- see `config/risk.yaml`'s
-`require_watchlist_membership`.
+### Where candidates come from
 
-### Meme coin handling
+All via [Jupiter's Tokens API v2](https://dev.jup.ag/docs/tokens/v2) (`api.jup.ag/tokens/v2`,
+free, no key):
+- `toporganicscore/{6h,24h}` -- tokens with real (non-wash-traded) trading interest
+- `toptrending/{1h,6h}` -- momentum/attention signal
+- `recent` -- newest pools, by first-pool creation time (highest-risk source,
+  balanced by the pool-age gate below)
 
-Meme coins are **in scope, on purpose** -- the agent can trade any
-watchlisted, verified token that looks like it can make money, memes
-included. Excluding them on principle would give up real, fast-moving edge;
-what actually needs managing is that meme tokens fail differently than
-blue-chips, not that they shouldn't be traded at all:
+Config: `config/discovery.yaml`'s `sources` block.
 
-- Liquidity that looks fine today can be gone in hours, not weeks -- the
-  checklist isn't a one-time gate for memes, re-run the liquidity/volume
-  checks (and ideally holder concentration) every single cycle, not just at
-  watchlist-add time.
-- Impersonator tokens reusing a popular ticker/name are extremely common.
-  Mint-address verification (see the checklist above) matters *more* here,
-  not less -- a wrong mint on a meme coin is a much easier mistake to make
-  than on an established blue-chip, precisely because there are more
-  copies floating around.
-- Price action is attention/momentum-driven more than fundamentals-driven.
-  Discovery tools (e.g. CoinGecko `get-trending`) are a legitimate way to
-  surface meme candidates worth researching -- but discovery only ever
-  *proposes*; it never trades directly (`trade-cycle` step 4).
-- Sizing stays smaller (`category_position_fraction_multiplier.meme` in
-  `config/watchlist.yaml`, plus `max_meme_positions` in `config/risk.yaml`)
-  because the *volatility and tail risk per dollar* is higher, which the
-  volatility-scaled sizing formula below already captures quantitatively --
-  the category multiplier is a second, simpler backstop on top of that, not
-  a redundant restriction dressed up as caution.
+### What gets checked, and why this design
+
+The single most useful discovery here: **Jupiter's own token response
+already includes an `audit` block** (`mintAuthorityDisabled`,
+`freezeAuthorityDisabled`, `topHoldersPercentage`) plus `isVerified`,
+`organicScore`, and `firstPool.createdAt` -- so most of the due-diligence
+checklist above is answerable from data the discovery call already returned,
+at zero extra network cost. The pipeline is two-staged specifically to take
+advantage of that:
+
+1. **Stage 1 (free, from the discovery response itself)**: liquidity,
+   holder count, organic score, mint/freeze authority, top-holder
+   concentration, pool age -- all computed with no extra API calls.
+2. **Stage 2 ([RugCheck.xyz](https://api.rugcheck.xyz), free, no key)**:
+   called *only* for candidates that already survive stage 1, specifically
+   for the one thing Jupiter's own data doesn't cover -- has this exact mint
+   already been confirmed as a rug (`report.rugged`), and does it carry any
+   RugCheck risk flag at danger/critical/high level.
+
+This ordering matters for a reason beyond efficiency: it was tested, not
+assumed. Querying RugCheck for a brand-new, 5-holder pump.fun token with a
+single wallet holding 99.96% of supply and effectively zero real liquidity
+returned `score: 1` (RugCheck's own composite 1-100 risk score, where lower
+reads as *safer*) and an **empty** `risks` array -- i.e., RugCheck's
+headline score alone would have called that token safe. The actual red
+flags were visible in *other* fields of the same response (holder
+concentration, liquidity), just not folded into the composite score. That's
+why this pipeline never trusts a single composite score from any one source
+-- every individual signal (liquidity, holders, concentration, age, organic
+score, authorities) is checked explicitly, and RugCheck's role is narrowed
+to what it's uniquely good for (confirmed rug history), not treated as a
+one-number verdict.
+
+An optional third check (`--cross-check-dexscreener`, on by default, only
+run against candidates that already pass) queries DexScreener as an
+independent liquidity/pool cross-check -- defense in depth against any
+single source drifting or being gamed.
+
+Thresholds live in `config/discovery.yaml`'s `safety` block and must be kept
+in sync with `research/discover_candidates.py`'s CLI defaults (the script
+doesn't parse the YAML, to stay dependency-free -- see the top of that file).
+
+### A real worked example
+
+A live run against Solana mainnet (see the script's own output) evaluated 12
+freshly-discovered candidates and found:
+
+- **`USDT` rejected** -- "mint authority not disabled; freeze authority not
+  disabled." Correct: Tether retains admin mint/freeze control over USDT by
+  design. This is exactly the kind of check that matters regardless of
+  whether a token *feels* like an obvious blue-chip.
+- Several pump.fun-style tokens rejected for **top-holder concentration above
+  20%** (one at 62.8%, one at 69.3%) -- classic single-wallet rug setups.
+- Several rejected for **pool age under 72 hours** and/or **liquidity under
+  $250k** -- too new/thin to trust yet, independent of anything else about them.
+- One token (`neet`, an established pump.fun-launched token) passed every
+  check: $1.05M liquidity, 20,808 holders, organic score 79.3, mint/freeze
+  authority both disabled, pool well past the age floor -- classified
+  `tier: established`.
+
+This is what "the agent finds its own coins" means concretely: not vibes or
+an LLM's judgment call on a mint address, but a repeatable, auditable filter
+run fresh against live data every cycle.
+
+### Risk tiers (computed live, never hand-labeled)
+
+`config/discovery.yaml`'s `tiers` block classifies every eligible candidate
+from its own live data -- market cap, holder count, verification status --
+into `blue_chip`, `established`, or `emerging`, each with its own position
+sizing multiplier (`trade-cycle` step 7). **`emerging` is the catch-all for
+anything that clears every safety check but isn't large/established yet --
+this is where memecoins land.** They are in scope on purpose: excluding them
+would give up real, fast-moving edge. What actually needs managing is that
+they fail differently than blue-chips (liquidity can be gone in hours, not
+weeks; impersonator tokens reusing a popular name/ticker are common), which
+is why sizing is smaller and `max_emerging_tier_positions` caps concurrent
+exposure -- not because they're restricted on principle, but because their
+volatility and tail risk per dollar is genuinely higher, which the
+volatility-scaled sizing formula below also captures quantitatively.
+
+`config/discovery.yaml`'s `pinned_candidates` (always considered, but still
+has to pass every safety check -- pinning isn't a bypass) and `denylist`
+(never traded, no exceptions) are the two manual overrides left in the
+system, for a human to use deliberately rather than by default.
 
 ## Current strategies (see `backtest/strategies.py`)
 
@@ -185,11 +248,11 @@ regardless of regime state.
 
 ### Concentration guardrails
 
-`max_meme_positions`, `max_same_ecosystem_positions`, and
+`max_emerging_tier_positions`, `max_same_ecosystem_positions`, and
 `max_non_stable_exposure_fraction` in `config/risk.yaml` exist because
 several nominally-different tokens can be the same bet in disguise (e.g.
 three different Solana-DeFi governance tokens that all just move with SOL
-beta, or two meme coins that both move on the same broad meme-market
+beta, or two memecoins that both move on the same broad meme-market
 sentiment). Diversification across tickers isn't real diversification if
 they're all correlated to the same underlying factor.
 

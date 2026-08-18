@@ -1,14 +1,16 @@
 ---
 name: trade-cycle
-description: Run one autonomous trading cycle for the Claude-Agent-Trader Solana wallet -- check safety gates, pull market research, generate signals, size and execute at most one or two trades within risk limits, and log everything. Use when the user asks to run a trading cycle, check the portfolio and trade, or when invoked on a schedule (/loop, a Routine) for autonomous operation. Requires the Phantom MCP server to be connected and authenticated in this session.
+description: Run one autonomous trading cycle for the Claude-Agent-Trader Solana wallet -- check safety gates, run live token discovery, pull market research, generate signals, size and execute at most one or two trades within risk limits, and log everything. Use when the user asks to run a trading cycle, check the portfolio and trade, or when invoked on a schedule (/loop, a Routine) for autonomous operation. Requires the Phantom MCP server to be connected and authenticated in this session.
 ---
 
 # Trade cycle
 
-One invocation of this skill = one full research-decide-execute-log cycle for
-the agent's Solana wallet. It is meant to be run repeatedly (manually, via
-`/loop`, or a scheduled Routine) -- see `docs/RUNBOOK.md` for how to start
-that. Follow these steps **in order**, and stop at the first gate that fails.
+One invocation of this skill = one full discover-research-decide-execute-log
+cycle for the agent's Solana wallet. There is no hand-maintained token list
+-- eligible tokens come from live discovery, run fresh each cycle (see step
+3). It is meant to be run repeatedly (manually, via `/loop`, or a scheduled
+Routine) -- see `docs/RUNBOOK.md`. Follow these steps **in order**, and stop
+at the first gate that fails.
 
 ## 0. Confirm environment
 
@@ -26,16 +28,16 @@ a session running on a machine that has completed that auth (see
    report the tripped reason and do not proceed. (A human must investigate,
    fix the underlying cause, and reset the breaker before trading resumes --
    see `docs/RUNBOOK.md` "Recovering from a circuit breaker trip".)
-3. Read `config/watchlist.yaml`. Only entries with `verified: true` are ever
-   tradeable (`require_verified_flag` in risk.yaml) -- treat any
-   `verified: false` entry (including meme coins) as informational only
-   until a human has actually checked the mint address and flipped it.
+3. Read `config/core_assets.yaml` (SOL, USDC) and `config/discovery.yaml`
+   (sources, thresholds, `pinned_candidates`, `denylist`).
 
 ## 2. Get current wallet state
 
 Use the Phantom MCP tools to get:
 - The agent wallet's address(es) (`get_wallet_addresses`).
-- Current balances for SOL, USDC, and every watchlist token held.
+- Current SOL/USDC balances and every currently-held token position
+  (whatever's actually in the wallet, whether or not it's still a discovery
+  candidate this cycle -- it needs to be trackable for exit either way).
 - Mark each balance to USD (use CoinGecko or the Phantom quote tools).
 
 Compute `portfolio_value_usd` = sum of all mark-to-market balances.
@@ -55,70 +57,97 @@ cycle.**
 Otherwise, update `peak_portfolio_value_usd` in `state/circuit_breaker.json`
 if the current value is a new high.
 
-## 3. Market regime filter (gates new entries only)
+## 3. Discover candidates
+
+Run:
+```
+python3 research/discover_candidates.py
+```
+(Skip this if a `research/results/discovery_*.json` file exists and is
+younger than `config/risk.yaml`'s `max_discovery_result_age_hours` -- no
+need to hit the free APIs again for a cycle running shortly after the last
+one.)
+
+This gives every discovered token's safety data and an `eligible: true/false`
+verdict computed from live, on-chain-backed checks -- see
+`docs/STRATEGY.md` "Autonomous discovery" for what each check means and why.
+From the output:
+
+- Every `eligible: true` token, plus `config/discovery.yaml`'s
+  `pinned_candidates` (still must currently show `eligible: true` in the
+  data to actually be traded -- pinning means "always consider," not "skip
+  the safety check"), forms this cycle's tradeable universe alongside SOL/USDC.
+- Remove anything on `config/discovery.yaml`'s `denylist`, no exceptions.
+- Rejected candidates get a one-line `"proposal_rejected"` journal note
+  (symbol, mint, top reason) so there's a record of what was considered and
+  why it didn't qualify -- useful for tuning thresholds later, not just for
+  audit purposes.
+- Any token currently held in the wallet (step 2) that ISN'T in this cycle's
+  eligible set is still manageable for exit (stop-loss/take-profit/manual
+  sell) -- discovery gates new entries, never blocks getting out of an
+  existing position.
+
+## 4. Market regime filter (gates new entries only)
 
 If `regime_filter_enabled` in `config/risk.yaml`, fetch
 `regime_reference_coin`'s (default: bitcoin) price history and compute
 whether it's currently above its own `regime_sma_window_days`-day SMA (same
 logic as `backtest/strategies.py`'s `regime()` helper, applied to the
 reference coin). If it's below -- "risk off" -- **do not open any new
-position this cycle**, meme or otherwise. Exits, stop-losses, and
-take-profits on existing positions are never gated by this; protecting
-capital always outranks the regime filter.
+position this cycle**, discovered or pinned, emerging-tier or blue-chip.
+Exits, stop-losses, and take-profits on existing positions are never gated
+by this; protecting capital always outranks the regime filter.
 
-## 4. Research
+## 5. Research
 
-For every token on the watchlist (plus any currently open position even if
-since removed from the watchlist, so it can still be exited):
+For every eligible candidate from step 3 (plus any open position needing
+price data for exit management):
 
-- Pull price, 24h change, 24h volume, and liquidity. Prefer a market-data MCP
-  tool if one is connected in this session (e.g. CoinGecko); otherwise fall
-  back to a direct HTTPS call to `https://api.coingecko.com/api/v3/...`
-  (no key required) via whatever fetch tool is available.
-- Confirm `min_liquidity_usd` and reasonable 24h volume are still met --
-  liquidity can evaporate; re-check every cycle, don't trust the watchlist
-  note alone. This matters even more for meme-category tokens (see
-  `docs/STRATEGY.md` "Meme coin handling") -- their liquidity can vanish in
-  hours, not weeks.
-- Use a trending/discovery tool (e.g. CoinGecko `get-trending`) as a
-  **candidate-generation** input, including for meme coins -- this is
-  explicitly in scope; the agent may propose any token, including memes,
-  that looks like it can make money. But discovery never skips the gate
-  below: any candidate not already watchlisted and `verified: true` gets
-  logged as a `"proposal"` journal entry with its due-diligence results, not
-  traded, until a human adds and verifies it.
+- Pull price and recent history via CoinGecko or the discovery data already
+  in hand. Note: very new/small ("emerging" tier) tokens often aren't on
+  CoinGecko at all -- fall back to Jupiter/DexScreener price data for these
+  (already present in the discovery JSON), and treat the lack of a
+  backtestable price history honestly (see step 6).
+- Re-confirm `min_liquidity_usd` right now, not just from the discovery run
+  a few minutes ago -- liquidity can move fast, especially for emerging-tier
+  tokens.
 
-## 5. Generate signals
+## 6. Generate signals
 
-For each watchlist token with enough price history, compute a signal using
-`backtest/strategies.py`'s `adaptive_ensemble` (preferred once it has a
-non-negative, low-overfit-risk out-of-sample result on file -- see
+For each eligible candidate with enough price history, compute a signal
+using `backtest/strategies.py`'s `adaptive_ensemble` (preferred once it has
+a non-negative, low-overfit-risk out-of-sample result on file -- see
 `.claude/skills/backtest-strategy`) or another strategy documented in
-`docs/STRATEGY.md` as validated. **Only use a strategy with a non-negative
-out-of-sample (`--walk-forward`) backtest result on file in
-`backtest/results/`** for a similar coin/timeframe -- if none exists, run
-the backtest skill first, or hold.
+`docs/STRATEGY.md` as validated.
 
-Combine signals across strategies conservatively where more than one is in
-play: a "buy" wants agreement (or at least no direct contradiction); a
-single strategy's sell/stop-loss/take-profit trigger is always enough to
-exit, since protecting capital matters more than confirmation.
+**A specific token with no backtestable history** (common for freshly
+discovered emerging-tier tokens) can still be traded -- discovery's own
+safety checks already gate out the worst cases -- but only at the smallest
+allowed size (`min_trade_usd`, or the tier's minimum), with the tightest
+stop-loss, since there's no historical confirmation the strategy has edge on
+*this specific token*, only that the strategy has edge on similar assets
+generally. Do not size a no-history token as if it had a validated edge.
 
-## 6. Position sizing & risk checks
+A single strategy's stop-loss/take-profit trigger is always enough to exit
+-- protecting capital doesn't need confirmation.
+
+## 7. Position sizing & risk checks
 
 Before proposing any trade, check ALL of:
 
-- [ ] Token is on `config/watchlist.yaml` with `verified: true` (or this is an exit of an existing position)
+- [ ] Token is SOL/USDC, or was `eligible: true` in this cycle's discovery
+      run and is not on the denylist (or this is an exit of an existing position)
 - [ ] `max_concurrent_positions` not exceeded (for a new entry)
-- [ ] `max_meme_positions` not exceeded (for a new meme-category entry)
+- [ ] `tiers.emerging.max_concurrent_positions` (i.e. `max_emerging_tier_positions`
+      in risk.yaml) not exceeded, for a new emerging-tier entry
 - [ ] `max_same_ecosystem_positions` not exceeded
 - [ ] `max_non_stable_exposure_fraction` not exceeded after this trade
-- [ ] Regime filter allows new entries (step 3)
-- [ ] Base position size = `min(max_position_usd, portfolio_value_usd * max_position_fraction) * category_multiplier`
-      (category multipliers in `config/watchlist.yaml` -- meme is intentionally smaller: a real chance to make money on a
-      meme coin doesn't require betting a large fraction of the account on it)
-- [ ] Volatility-scaled size = `base_size * clamp(target_daily_volatility_pct / realized_20d_volatility_pct, volatility_size_min_mult, volatility_size_max_mult)`,
-      and this is `>= min_trade_usd` (else skip -- too small to be worth fees)
+- [ ] Regime filter allows new entries (step 4)
+- [ ] Base position size = `min(max_position_usd, portfolio_value_usd * max_position_fraction) * tier_multiplier`
+      (tier multipliers from `config/discovery.yaml`'s `tiers` block)
+- [ ] Volatility-scaled size = `base_size * clamp(target_daily_volatility_pct / realized_20d_volatility_pct, volatility_size_min_mult, volatility_size_max_mult)`
+      (skip this scaling -- use the tier's minimum size instead -- for a token with no price history per step 6),
+      and the result is `>= min_trade_usd` (else skip -- too small to be worth fees)
 - [ ] Adding this position keeps `sum(position_size_usd * stop_loss_pct) / portfolio_value_usd <= max_portfolio_heat_pct`
       (portfolio heat -- compute across ALL open positions including this candidate)
 - [ ] Today's cumulative trade count < `max_daily_trade_count`
@@ -129,7 +158,7 @@ Before proposing any trade, check ALL of:
 
 If any check fails, do not trade that signal -- log why and move on.
 
-## 7. Execute
+## 8. Execute
 
 For each trade that passes every check (cap this at a small number per
 cycle -- 1-2 trades is normal; if many signals fire at once, that's a reason
@@ -144,18 +173,22 @@ If a call errors or the fill looks wrong (e.g. price far off the quote),
 stop executing further trades this cycle and log the anomaly clearly --
 do not retry blindly.
 
-## 8. Log
+## 9. Log
 
 Append one entry to `journal/trades.jsonl` per `journal/README.md`'s format,
-covering every token considered this cycle (not just ones traded), the
-risk-check results (including portfolio heat and regime state), and the
-action taken (including explicit `"hold"` entries). Update
-`state/circuit_breaker.json`'s `peak_portfolio_value_usd` if applicable.
+covering the discovery result summary (how many candidates found/eligible/
+rejected), every eligible token considered this cycle for trading (not just
+ones traded), the risk-check results (including portfolio heat, regime
+state, and tier), and the action taken (including explicit `"hold"`
+entries). Update `state/circuit_breaker.json`'s `peak_portfolio_value_usd`
+if applicable.
 
-## 9. Report
+## 10. Report
 
-Give the user a short summary: portfolio value before/after, what was
-traded (if anything) and why, current open positions, current regime state
-and portfolio heat, and whether anything needs their attention (a circuit
-breaker trip, a proposed new watchlist token -- meme or otherwise, a
-repeated execution anomaly).
+Give the user a short summary: portfolio value before/after, discovery stats
+(candidates found / eligible / rejected, and why the rejections failed if
+notable), what was traded (if anything) and why, current open positions,
+current regime state and portfolio heat, and whether anything needs their
+attention (a circuit breaker trip, a repeated execution anomaly, a
+discovery-threshold that seems to be rejecting everything or passing too
+much).
