@@ -15,8 +15,12 @@ This runs discovery itself, then walk-forward backtests every eligible
 candidate (plus SOL and BTC always) against every strategy in one pass,
 printing a ranked summary table and saving the full report to
 `backtest/results/backtest_all_*.json`. Use `--max-candidates` /
-`--limit-per-source` to widen or narrow the discovery pool, and
-`--skip-discovery` for a fast SOL/BTC-only sanity check. Prefer this over
+`--limit-per-source` to widen or narrow the discovery pool,
+`--skip-discovery` for a fast SOL/BTC-only sanity check, and the same
+`--min-liquidity-usd` / `--min-holder-count` / etc. flags as
+`research/discover_candidates.py` to explore how a looser or tighter
+universe would have backtested (this never changes what actually trades
+live -- that's still `config/discovery.yaml`). Prefer this over
 the single-token workflow below whenever the question is "how is the
 strategy doing across the current universe," not just "how does it do on
 this one token" -- it's also the right tool for periodically re-checking

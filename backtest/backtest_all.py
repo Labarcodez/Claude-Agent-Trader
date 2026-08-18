@@ -34,11 +34,10 @@ sys.path.insert(0, str(REPO_ROOT))
 
 from research import discover_candidates as disco  # noqa: E402
 from backtest import fetch_history as fh  # noqa: E402
-from backtest.engine import run_walk_forward  # noqa: E402
+from backtest.engine import run_walk_forward, assess_overfit  # noqa: E402
 from backtest.strategies import STRATEGIES  # noqa: E402
 
 RESULTS_DIR = Path(__file__).parent / "results"
-OVERFIT_GAP_THRESHOLD_PCT = 15.0
 
 CORE_REFERENCE_COINS = [
     {"symbol": "SOL", "coin_id": "solana"},
@@ -46,15 +45,22 @@ CORE_REFERENCE_COINS = [
 ]
 
 
-def disco_args(request_delay: float) -> argparse.Namespace:
-    """Mirrors config/discovery.yaml's safety/tier defaults -- see that
-    file's header for why this isn't parsed from the YAML directly."""
+def disco_args(args: argparse.Namespace) -> argparse.Namespace:
+    """Adapts this script's own CLI args into the shape
+    research.discover_candidates.evaluate_candidate expects. Defaults mirror
+    config/discovery.yaml's safety/tier block -- see that file's header for
+    why this isn't parsed from the YAML directly. All overridable via this
+    script's own flags, same as research/discover_candidates.py and
+    paper_trading/run_paper_cycle.py -- keep the three in sync by hand."""
     return argparse.Namespace(
-        request_delay=request_delay, min_liquidity_usd=250_000, min_holder_count=500,
-        min_organic_score=40, min_pool_age_hours=72, max_top_holder_pct=20.0,
+        request_delay=args.request_delay,
+        min_liquidity_usd=args.min_liquidity_usd, min_holder_count=args.min_holder_count,
+        min_organic_score=args.min_organic_score, min_pool_age_hours=args.min_pool_age_hours,
+        max_top_holder_pct=args.max_top_holder_pct,
         require_mint_renounced=True, require_freeze_renounced=True, always_rugcheck=False,
-        cross_check_dexscreener=False, blue_chip_mcap_usd=50_000_000, blue_chip_holder_count=10_000,
-        established_mcap_usd=5_000_000, established_holder_count=2_000,
+        cross_check_dexscreener=False,
+        blue_chip_mcap_usd=args.blue_chip_mcap_usd, blue_chip_holder_count=args.blue_chip_holder_count,
+        established_mcap_usd=args.established_mcap_usd, established_holder_count=args.established_holder_count,
     )
 
 
@@ -65,7 +71,7 @@ def discover_eligible(args) -> list[dict]:
     mints = list(candidates.keys())[: args.max_candidates]
     eligible = []
     for mint in mints:
-        result = disco.evaluate_candidate(mint, candidates[mint], disco_args(args.request_delay))
+        result = disco.evaluate_candidate(mint, candidates[mint], disco_args(args))
         if result["eligible"]:
             eligible.append({"symbol": result["symbol"], "mint": mint, "tier": result["tier"]})
     return eligible
@@ -79,8 +85,7 @@ def backtest_asset(cache_key: str, days: int) -> list[dict]:
         except Exception as e:
             rows.append({"strategy": name, "error": str(e)})
             continue
-        gap = train.total_return_pct - test.total_return_pct
-        overfit = (train.total_return_pct > 0 > test.total_return_pct) or gap > OVERFIT_GAP_THRESHOLD_PCT
+        gap, overfit = assess_overfit(train, test)
         rows.append({
             "strategy": name,
             "train_return_pct": train.total_return_pct,
@@ -104,6 +109,19 @@ def main():
     ap.add_argument("--limit-per-source", type=int, default=10)
     ap.add_argument("--request-delay", type=float, default=0.4)
     ap.add_argument("--skip-discovery", action="store_true", help="Only backtest SOL + BTC (fast, no discovery pass)")
+    # Discovery safety/tier thresholds -- same flags and defaults as
+    # research/discover_candidates.py and paper_trading/run_paper_cycle.py,
+    # mirroring config/discovery.yaml. Override here if you want this run to
+    # explore a looser/tighter universe than the live defaults.
+    ap.add_argument("--min-liquidity-usd", type=float, default=250_000)
+    ap.add_argument("--min-holder-count", type=int, default=500)
+    ap.add_argument("--min-organic-score", type=float, default=40)
+    ap.add_argument("--min-pool-age-hours", type=float, default=72)
+    ap.add_argument("--max-top-holder-pct", type=float, default=20.0)
+    ap.add_argument("--blue-chip-mcap-usd", type=float, default=50_000_000)
+    ap.add_argument("--blue-chip-holder-count", type=int, default=10_000)
+    ap.add_argument("--established-mcap-usd", type=float, default=5_000_000)
+    ap.add_argument("--established-holder-count", type=int, default=2_000)
     args = ap.parse_args()
 
     assets = [{"symbol": c["symbol"], "cache_key": c["coin_id"], "kind": "coin", "ref": c["coin_id"], "tier": "reference"}

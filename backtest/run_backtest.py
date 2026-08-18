@@ -14,15 +14,10 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).parent))
-from engine import run_backtest, run_walk_forward, format_report  # noqa: E402
+from engine import run_backtest, run_walk_forward, format_report, assess_overfit  # noqa: E402
 from strategies import STRATEGIES  # noqa: E402
 
 RESULTS_DIR = Path(__file__).parent / "results"
-
-# A large train/test gap means the strategy (or hand-tuned parameters) is
-# fitting noise in the training window rather than a real edge -- see
-# docs/STRATEGY.md "Judging a backtest".
-OVERFIT_GAP_THRESHOLD_PCT = 15.0
 
 
 def _summary_row(name: str, coin: str, days: int, result) -> dict:
@@ -66,8 +61,7 @@ def main():
             print(format_report(train))
             print("-- TEST (out-of-sample) --")
             print(format_report(test))
-            gap = train.total_return_pct - test.total_return_pct
-            overfit_flag = (train.total_return_pct > 0 > test.total_return_pct) or gap > OVERFIT_GAP_THRESHOLD_PCT
+            gap, overfit_flag = assess_overfit(train, test)
             if overfit_flag:
                 print(f"⚠ Overfit risk: HIGH (train {train.total_return_pct:+.1f}% vs test {test.total_return_pct:+.1f}%, "
                       f"gap {gap:+.1f}pp) -- do not trust this result for live trading without investigation.")

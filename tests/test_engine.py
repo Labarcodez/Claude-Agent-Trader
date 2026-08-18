@@ -90,5 +90,40 @@ class TestSimulateMechanics(unittest.TestCase):
         self.assertGreater(result.ending_equity, 1.0)
 
 
+class TestAssessOverfit(unittest.TestCase):
+    """assess_overfit() is the single source of truth both run_backtest.py
+    and backtest_all.py call -- previously each kept its own copy of this
+    threshold/formula, which is exactly the kind of drift a shared helper
+    (and this test) is meant to prevent."""
+
+    def _result(self, total_return_pct: float) -> engine.BacktestResult:
+        r = engine.BacktestResult(strategy="x", coin="y")
+        r.starting_equity = 1.0
+        r.ending_equity = 1.0 + total_return_pct / 100
+        return r
+
+    def test_profitable_train_losing_test_is_high_risk(self):
+        gap, is_high_risk = engine.assess_overfit(self._result(20), self._result(-5))
+        self.assertTrue(is_high_risk)
+        self.assertAlmostEqual(gap, 25.0, places=4)
+
+    def test_large_positive_gap_is_high_risk_even_if_both_profitable(self):
+        gap, is_high_risk = engine.assess_overfit(self._result(30), self._result(5))
+        self.assertTrue(is_high_risk)
+
+    def test_similar_train_and_test_is_not_high_risk(self):
+        gap, is_high_risk = engine.assess_overfit(self._result(8), self._result(6))
+        self.assertFalse(is_high_risk)
+
+    def test_test_outperforming_train_is_not_high_risk(self):
+        gap, is_high_risk = engine.assess_overfit(self._result(-5), self._result(10))
+        self.assertFalse(is_high_risk)
+        self.assertLess(gap, 0)
+
+    def test_both_losing_similarly_is_not_high_risk(self):
+        gap, is_high_risk = engine.assess_overfit(self._result(-10), self._result(-12))
+        self.assertFalse(is_high_risk)
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -15,6 +15,14 @@ from pathlib import Path
 
 CACHE_DIR = Path(__file__).parent / "cache"
 
+# A train/test gap bigger than this (in percentage points), or a strategy
+# that's profitable in-sample but loses out-of-sample, means it's fitting
+# noise in the training window rather than a real edge. Single source of
+# truth -- both run_backtest.py and backtest_all.py call assess_overfit()
+# rather than each keeping their own copy of this threshold/formula, so the
+# two tools can't silently disagree about what counts as "HIGH" risk.
+OVERFIT_GAP_THRESHOLD_PCT = 15.0
+
 
 @dataclass
 class Trade:
@@ -176,6 +184,14 @@ def run_walk_forward(coin_id: str, days: int, strategy_fn, split: float = 0.7, f
     test = _simulate(series, coin_id, strategy_fn, fee_bps, slippage_bps,
                       start_index=split_index, **strategy_kwargs)
     return train, test
+
+
+def assess_overfit(train: BacktestResult, test: BacktestResult) -> tuple[float, bool]:
+    """Returns (gap_pct, is_high_risk) for a walk-forward train/test pair.
+    See docs/STRATEGY.md "Judging a backtest" for how to read the gap."""
+    gap = train.total_return_pct - test.total_return_pct
+    is_high_risk = (train.total_return_pct > 0 > test.total_return_pct) or gap > OVERFIT_GAP_THRESHOLD_PCT
+    return gap, is_high_risk
 
 
 def format_report(result: BacktestResult) -> str:

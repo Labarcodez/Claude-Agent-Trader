@@ -138,8 +138,7 @@ Before proposing any trade, check ALL of:
 - [ ] Token is SOL/USDC, or was `eligible: true` in this cycle's discovery
       run and is not on the denylist (or this is an exit of an existing position)
 - [ ] `max_concurrent_positions` not exceeded (for a new entry)
-- [ ] `tiers.emerging.max_concurrent_positions` (i.e. `max_emerging_tier_positions`
-      in risk.yaml) not exceeded, for a new emerging-tier entry
+- [ ] `max_emerging_tier_positions` not exceeded, for a new emerging-tier entry
 - [ ] `max_same_ecosystem_positions` not exceeded
 - [ ] `max_non_stable_exposure_fraction` not exceeded after this trade
 - [ ] Regime filter allows new entries (step 4)

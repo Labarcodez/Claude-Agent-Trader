@@ -73,7 +73,7 @@ mistake before it costs real money:
 
 1. **Unit tests** -- is the arithmetic right? (e.g. does a fee actually
    reduce the recorded return; does a flat/no-movement price series get
-   read as neutral instead of "overbought" -- an real edge case these tests
+   read as neutral instead of "overbought" -- a real edge case these tests
    caught and fixed during development, see `backtest/strategies.py`'s `rsi()`)
 2. **Backtests** (`--walk-forward`) -- does a strategy have real, out-of-sample edge?
 3. **Paper trading** -- does the *whole pipeline* (discovery + regime +
@@ -155,7 +155,7 @@ circuit-breaker recovery.
 | `backtest/` | Backtesting engine, strategies, single-token CLI |
 | `backtest/backtest_all.py` | Comprehensive backtest -- everything eligible + SOL/BTC, one ranked report |
 | `paper_trading/run_paper_cycle.py` | Paper-trading simulator (real pipeline, simulated fills) |
-| `tests/` | Unit tests (stdlib `unittest`) for strategies, engine, discovery logic |
+| `tests/` | Unit tests (stdlib `unittest`) for strategies, engine, discovery, and paper-trading sizing logic |
 | `.github/workflows/tests.yml` | CI -- runs `tests/` on every push/PR |
 | `docs/PHANTOM_MCP_SETUP.md` | Wallet setup & funding |
 | `docs/STRATEGY.md` | Coin fundamentals, autonomous discovery, strategy/risk reasoning |

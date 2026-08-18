@@ -83,12 +83,15 @@ and only trades ones that pass automated, on-chain-backed safety checks.
    is a blind spot.
 7. **Discovery thresholds are a safety boundary, not a suggestion to tune
    looser for more opportunities.** If `config/discovery.yaml`'s `safety`
-   block changes, keep `research/discover_candidates.py`'s CLI defaults in
-   sync (the script doesn't parse the YAML), and understand why each
-   threshold exists per `docs/STRATEGY.md` before loosening it.
+   block changes, keep it in sync with the CLI defaults in
+   `research/discover_candidates.py`, `paper_trading/run_paper_cycle.py`,
+   and `backtest/backtest_all.py` (none of them parse the YAML -- see
+   `research/discover_candidates.py`'s docstring for why), and understand
+   why each threshold exists per `docs/STRATEGY.md` before loosening it.
 8. **Run `python3 -m unittest discover -s tests -v` after touching any
-   logic in `backtest/` or `research/discover_candidates.py`, before
-   claiming the change works.** The test suite exists specifically because
-   this kind of code has non-obvious edge cases (see `backtest/strategies.py`'s
-   `rsi()` -- a flat/no-movement price series used to read as "overbought"
-   until a test caught it); don't reintroduce what it's already checking for.
+   logic in `backtest/`, `research/discover_candidates.py`, or
+   `paper_trading/run_paper_cycle.py`, before claiming the change works.**
+   The test suite exists specifically because this kind of code has
+   non-obvious edge cases (see `backtest/strategies.py`'s `rsi()` -- a
+   flat/no-movement price series used to read as "overbought" until a test
+   caught it); don't reintroduce what it's already checking for.

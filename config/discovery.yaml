@@ -6,10 +6,13 @@
 # (always considered) and `denylist` (never traded, no matter what).
 #
 # Reference implementation: research/discover_candidates.py -- this file's
-# `safety` and `tiers` values should match that script's CLI defaults; if you
-# change one, change the other. Reasoning and a real worked example (live
-# run output, including why it rejected USDT and several memecoins) are in
-# docs/STRATEGY.md "Autonomous discovery".
+# `safety` and `tiers` values should match that script's CLI defaults, AND
+# the same defaults duplicated in paper_trading/run_paper_cycle.py and
+# backtest/backtest_all.py (all three mirror this file rather than parsing
+# it, to stay dependency-free -- see research/discover_candidates.py's
+# docstring). Change one, change all four. Reasoning and a real worked
+# example (live run output, including why it rejected USDT and several
+# memecoins) are in docs/STRATEGY.md "Autonomous discovery".
 
 enabled: true
 
@@ -60,6 +63,11 @@ safety:
 # etc. "emerging" is the catch-all for anything that passes every safety
 # check above but isn't large/established yet -- this is where memecoins
 # land. They are IN SCOPE, sized smaller for their variance, not excluded.
+#
+# Position-COUNT caps (as opposed to sizing multipliers) live entirely in
+# config/risk.yaml (max_concurrent_positions, max_emerging_tier_positions,
+# max_same_ecosystem_positions) -- deliberately not duplicated here, so
+# there's exactly one place to look for "how many positions can be open."
 tiers:
   blue_chip:
     min_mcap_usd: 50000000
@@ -72,4 +80,3 @@ tiers:
     position_fraction_multiplier: 0.7
   emerging:
     position_fraction_multiplier: 0.4
-    max_concurrent_positions: 2    # analogous to the old max_meme_positions -- applies within this tier specifically

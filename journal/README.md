@@ -52,6 +52,35 @@ Every cycle should append an entry even when the decision is "hold" for every
 token -- a gap in the log is a debugging blind spot. Use `"action": {"type": "hold"}`
 for no-op cycles.
 
+## `journal/paper_trades.jsonl` uses a different, simpler format
+
+The format above is what `trade-cycle` (an LLM-driven skill) is instructed
+to write. `paper_trading/run_paper_cycle.py` is a plain Python script, not
+an LLM following instructions, so `journal/paper_trades.jsonl` has its own
+fixed, code-defined shape instead -- don't expect the two files to match:
+
+```json
+{
+  "timestamp": "2026-08-18T18:30:00Z",
+  "type": "cycle",
+  "portfolio_value_usd_before": 50.00,
+  "portfolio_value_usd_after": 49.85,
+  "regime_allows_new_entries": true,
+  "discovery": {"found": 42, "evaluated": 15, "eligible": 2, "rejected": 13},
+  "actions": [
+    {"type": "buy", "symbol": "JUP", "mint": "...", "tier": "blue_chip", "size_usd": 14.5, "fill_price": 0.421, "signal_basis": "buy signal"},
+    {"type": "sell", "symbol": "BONK", "mint": "...", "reason": "stop-loss (-15.2%)", "return_pct": -15.2}
+  ],
+  "open_positions": 2
+}
+```
+
+or, on a circuit breaker trip: `{"timestamp": ..., "type": "circuit_breaker_trip", "reason": "...", "portfolio_value_usd": 19.40}`.
+See `paper_trading/run_paper_cycle.py`'s `append_journal()` call sites for
+the authoritative shape if this drifts from the code -- unlike
+`trades.jsonl`, this one's schema lives in code, not in an LLM's judgment,
+so it's exact but less descriptive per entry.
+
 ## Why this matters
 
 - It's the only way to sanity-check the strategy against what actually
