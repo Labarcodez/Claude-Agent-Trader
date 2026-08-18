@@ -26,8 +26,10 @@ signals.
    [`.claude/skills/backtest-strategy`](.claude/skills/backtest-strategy/SKILL.md)
    ```
    python3 backtest/fetch_history.py --coin solana --days 180
-   python3 backtest/run_backtest.py --coin solana --days 180
+   python3 backtest/run_backtest.py --coin solana --days 180 --strategy all --walk-forward
    ```
+   `--walk-forward` runs an out-of-sample train/test split and flags overfit
+   risk -- prefer it over a plain in-sample run before trusting a result.
 4. **Run one trade cycle manually**, then automate:
    [`docs/RUNBOOK.md`](docs/RUNBOOK.md)
 
@@ -43,11 +45,13 @@ backtest/strategies.py ───────┘        ▼
                                 journal/trades.jsonl (audit log)
 ```
 
-Each `trade-cycle` run: checks the kill switch and circuit breaker, pulls
-live market data for watchlisted tokens, generates signals from backtested
-strategies, sizes any resulting trade against hard caps (max position size,
-daily volume, slippage, liquidity), executes through Phantom, and logs
-everything. See [`.claude/skills/trade-cycle/SKILL.md`](.claude/skills/trade-cycle/SKILL.md)
+Each `trade-cycle` run: checks the kill switch, circuit breaker, and market
+regime; pulls live market data for watchlisted tokens (memecoins included,
+gated the same as anything else); generates signals from a regime-aware,
+backtested strategy ensemble; sizes any resulting trade against hard caps
+(volatility-scaled position size, portfolio heat, daily volume, slippage,
+liquidity, concentration); executes through Phantom; and logs everything.
+See [`.claude/skills/trade-cycle/SKILL.md`](.claude/skills/trade-cycle/SKILL.md)
 for the full step-by-step.
 
 ## Safety model
@@ -56,10 +60,21 @@ for the full step-by-step.
   immediately.
 - **Circuit breaker**: auto-trips and halts new trades if the portfolio
   drops to a configured floor or a large single-day drawdown.
-- **Watchlist gate**: the agent can only ever buy tokens on
-  `config/watchlist.yaml`, each vetted against the due-diligence checklist
-  in `docs/STRATEGY.md` (liquidity, mint/freeze authority, holder
-  concentration, project legitimacy).
+- **Watchlist + verification gate**: the agent can only ever buy tokens on
+  `config/watchlist.yaml` that are also marked `verified: true`, each vetted
+  against the due-diligence checklist in `docs/STRATEGY.md` (liquidity,
+  mint/freeze authority, holder concentration, project legitimacy) --
+  memecoins are explicitly in scope, but go through the same gate, with
+  extra scrutiny since impersonator tokens are common.
+- **Market regime filter**: blocks *new* entries (never exits) while the
+  broader market is trading below its own trend, so the agent isn't opening
+  fresh risk into a market-wide downturn.
+- **Volatility-scaled sizing + portfolio heat cap**: position size adjusts
+  to each asset's own volatility, and total capital-at-risk across all open
+  positions combined is capped independently of any single position's size.
+- **Concentration guardrails**: caps on meme positions, same-ecosystem
+  positions, and non-stable exposure, so correlated tokens can't quietly
+  become one oversized bet.
 - **Position/volume/slippage caps**: enforced every cycle before any trade,
   independent of what the strategy signal says.
 - **Separate wallet**: Phantom MCP issues the agent its own dedicated

@@ -98,8 +98,72 @@ def volatility_breakout(closes: list[float], i: int, state: dict, lookback: int 
     return "hold"
 
 
+def realized_vol(values: list[float], window: int = 20) -> float | None:
+    """Stdev of daily returns over the trailing window, as a fraction (e.g.
+    0.03 = 3%/day). Used both for the regime filter's trend-strength check
+    and for volatility-scaled position sizing (config/risk.yaml)."""
+    if len(values) < window + 1:
+        return None
+    rets = [(values[j] - values[j - 1]) / values[j - 1] for j in range(len(values) - window, len(values))]
+    return stats.pstdev(rets) if len(rets) > 1 else None
+
+
+def regime(closes: list[float], i: int, fast: int = 10, slow: int = 30, vol_window: int = 20) -> str:
+    """Classifies the current bar as "trending" or "ranging" using trend
+    strength (how far apart the fast/slow SMAs are) relative to recent
+    volatility. Not a tradable signal on its own -- used by adaptive_ensemble
+    and documented in config/risk.yaml's regime_filter as the same idea
+    applied at the whole-market level (BTC vs. its own SMA) to gate new
+    entries. A wide fast/slow SMA gap relative to volatility means a real
+    trend is underway; a narrow gap means the market is chopping sideways."""
+    window = closes[: i + 1]
+    f, s = sma(window, fast), sma(window, slow)
+    vol = realized_vol(window, vol_window)
+    if f is None or s is None or vol is None or vol == 0 or window[-1] == 0:
+        return "ranging"  # default to the more conservative regime when data is thin
+    trend_strength = abs(f - s) / (window[-1] * vol)
+    return "trending" if trend_strength > 1.5 else "ranging"
+
+
+def adaptive_ensemble(closes: list[float], i: int, state: dict) -> str:
+    """Regime-aware weighted vote across the three base strategies, instead of
+    picking one strategy and hoping the market cooperates. In a trending
+    regime, trend-following signals (SMA crossover, volatility breakout) get
+    most of the weight; in a ranging regime, mean-reversion (RSI) dominates.
+    A signal only fires if the weighted vote clears +/-0.5 -- disagreement
+    between sub-strategies resolves to "hold" rather than guessing.
+
+    This is the strategy config/risk.yaml and the trade-cycle skill expect to
+    be the default live strategy once it backtests acceptably (see
+    docs/STRATEGY.md "Judging a backtest" and the --walk-forward flag on
+    backtest/run_backtest.py) -- but it is not a guarantee, and it should be
+    re-validated the same as any other strategy before being trusted, and
+    periodically after."""
+    r = regime(closes, i)
+    sub_signals = {
+        "sma_crossover": sma_crossover(closes, i, state),
+        "rsi_mean_reversion": rsi_mean_reversion(closes, i, state),
+        "volatility_breakout": volatility_breakout(closes, i, state),
+    }
+    weights = (
+        {"sma_crossover": 0.55, "volatility_breakout": 0.45, "rsi_mean_reversion": 0.0}
+        if r == "trending"
+        else {"rsi_mean_reversion": 0.7, "sma_crossover": 0.15, "volatility_breakout": 0.15}
+    )
+    score = 0.0
+    for name, sig in sub_signals.items():
+        vote = {"buy": 1, "sell": -1, "hold": 0}[sig]
+        score += vote * weights[name]
+    if score >= 0.5:
+        return "buy"
+    if score <= -0.5:
+        return "sell"
+    return "hold"
+
+
 STRATEGIES = {
     "sma_crossover": sma_crossover,
     "rsi_mean_reversion": rsi_mean_reversion,
     "volatility_breakout": volatility_breakout,
+    "adaptive_ensemble": adaptive_ensemble,
 }

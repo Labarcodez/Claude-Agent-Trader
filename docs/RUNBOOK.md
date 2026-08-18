@@ -8,14 +8,17 @@
    authoritative source before trusting it (see `docs/STRATEGY.md`'s
    due-diligence checklist) -- the addresses shipped in this repo were
    researched carefully but you are the one funding the wallet; re-verify.
-3. Run backtests for each watchlist token:
+3. Run backtests for each watchlist token, with `--walk-forward` to check for
+   overfitting rather than trusting a single in-sample run:
    ```
    python3 backtest/fetch_history.py --coin solana --days 180
-   python3 backtest/run_backtest.py --coin solana --days 180
-   # repeat for jupiter-exchange-solana, pyth-network, jito-governance-token, raydium, ...
+   python3 backtest/run_backtest.py --coin solana --days 180 --strategy all --walk-forward
+   # repeat for jupiter-exchange-solana, pyth-network, jito-governance-token, raydium,
+   # bitcoin (the regime-filter reference coin), and any meme-category tokens you enable
    ```
-   Only strategies with a non-negative result should be relied on live
-   (`docs/STRATEGY.md` "Judging a backtest").
+   Only strategies with a non-negative **out-of-sample** result and low
+   overfit risk should be relied on live (`docs/STRATEGY.md` "Judging a
+   backtest").
 4. Run one `trade-cycle` manually (ask Claude Code, in this repo, to run the
    `trade-cycle` skill once) and read the journal entry it produces in
    `journal/trades.jsonl` before automating anything.

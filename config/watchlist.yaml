@@ -1,8 +1,20 @@
 # Allow-listed Solana tokens the agent is permitted to trade.
-# Every entry has already passed the due-diligence checklist in docs/STRATEGY.md
-# as of the date added. The agent should still re-check liquidity/volume live
-# each cycle (markets change), but does NOT need to re-litigate contract safety
-# for tokens already on this list.
+#
+# ############################################################################
+# # `verified: false` means the mint address below was populated from       #
+# # research/training memory, NOT re-checked live against an authoritative  #
+# # source at watchlist-authoring time. config/risk.yaml's                  #
+# # `require_verified_flag: true` makes this a HARD GATE: the trade-cycle   #
+# # skill must refuse to trade any entry that isn't `verified: true`.       #
+# #                                                                          #
+# # To verify and flip a flag: check the mint address against the           #
+# # project's own official docs/site AND a block explorer (Solscan /        #
+# # Solana Explorer), confirm it matches, then set verified: true and fill  #
+# # in verified_date. Do this yourself before first live use -- don't      #
+# # trust an LLM's recollection of a mint address with real money. See      #
+# # docs/STRATEGY.md's due-diligence checklist for the full process (also  #
+# # required for any brand-new token, verified or not).                    #
+# ############################################################################
 #
 # category: blue_chip | defi | meme
 # meme-category tokens get a smaller max_position_fraction override (see notes)
@@ -13,40 +25,69 @@ tokens:
   - symbol: SOL
     mint: "So11111111111111111111111111111111111111112"
     category: blue_chip
-    notes: "Native asset. Base of the portfolio; also the settlement asset for swaps."
+    verified: false
+    verified_date: null
+    notes: "Native asset (wrapped SOL mint). Base of the portfolio; also the settlement asset for swaps."
 
   - symbol: USDC
     mint: "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v"
     category: blue_chip
-    notes: "Stablecoin. Used as the 'cash' / risk-off position between trades."
+    verified: false
+    verified_date: null
+    notes: "Circle's official Solana USDC mint (per training-data recollection). Used as the 'cash' / risk-off position between trades. Verify against circle.com's official contract list."
 
   - symbol: JUP
     mint: "JUPyiwrYJFskUPiHa7hkeR8VUtAeFoSYbKedZNsDvCN"
     category: defi
+    verified: false
+    verified_date: null
     notes: "Jupiter aggregator governance token. Deep liquidity, long track record."
 
   - symbol: JTO
     mint: "jtojtomepa8beP8AuQc6eXt5FriJwfFMwQx2v2f9mCL"
     category: defi
+    verified: false
+    verified_date: null
     notes: "Jito governance token. MEV/staking infra, established liquidity."
 
   - symbol: PYTH
     mint: "HZ1JovNiVvGrGNiiYvEozEVgZ58xaU3RKwX8eACQBCt3"
     category: defi
+    verified: false
+    verified_date: null
     notes: "Pyth Network oracle token."
 
   - symbol: RAY
     mint: "4k3Dyjzvzp8eMZWUXbBCjEvwSkkk59S5iCNLY3QrkX6R"
     category: defi
+    verified: false
+    verified_date: null
     notes: "Raydium DEX token."
 
-# Meme-category example, deliberately capped smaller (see docs/STRATEGY.md
-# "Meme coin handling"). Uncomment and verify mint address freshly before
-# enabling -- meme token mints churn and impersonators are extremely common.
-# - symbol: BONK
-#   mint: "DezXAZ8z7PnrnRJjz3wXBoRgixCa6xjnB7YaB1pPB263"
-#   category: meme
-#   notes: "High volatility. Confirm mint + liquidity + holder concentration fresh each cycle."
+  # Meme-category tokens are IN SCOPE -- the agent may trade any watchlisted,
+  # verified token that looks like it can make money, memes included. They
+  # get a smaller max_position_fraction override (see the multiplier table
+  # below) and a lower max_meme_positions cap in config/risk.yaml, because
+  # their liquidity and price can evaporate far faster than a blue-chip's,
+  # not because they're excluded on principle. See docs/STRATEGY.md "Meme
+  # coin handling" for the extra due-diligence intensity meme tokens need
+  # (mint/freeze authority and holder concentration matter *more* here, not
+  # less) -- re-verify every one, including the mint addresses below, before
+  # relying on them; meme mints churn and impersonator tokens reusing a
+  # popular name/ticker are extremely common on Solana.
+  - symbol: BONK
+    mint: "DezXAZ8z7PnrnRJjz3wXBoRgixCa6xjnB7YaB1pPB263"
+    category: meme
+    verified: false
+    verified_date: null
+    notes: "One of the longest-running, most liquid Solana meme tokens. Still re-verify mint + liquidity + holder concentration fresh, per the checklist, before first live trade."
+
+  - symbol: WIF
+    mint: "EKpQGSJtjMFqKZ9KQanSqYXRcF8fBopzLHYxdM65zcjm"
+    category: meme
+    verified: false
+    verified_date: null
+    notes: "dogwifhat. High liquidity historically but meme-typical volatility. Re-verify mint address especially carefully -- this ticker has attracted impersonator tokens."
 
 # Position sizing overrides by category (fraction of the global
 # max_position_fraction in config/risk.yaml that this category may use):

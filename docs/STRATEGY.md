@@ -70,11 +70,31 @@ not added to the watchlist, and never traded -- see `config/risk.yaml`'s
 
 ### Meme coin handling
 
-Meme tokens can be added to the watchlist if they clear the checklist above,
-but always at a reduced `category_position_fraction_multiplier` (0.4x by
-default in `config/watchlist.yaml`) because liquidity that looks fine today
-can vanish in hours. Re-verify liquidity every single cycle for meme-category
-holdings, not just at watchlist-add time.
+Meme coins are **in scope, on purpose** -- the agent can trade any
+watchlisted, verified token that looks like it can make money, memes
+included. Excluding them on principle would give up real, fast-moving edge;
+what actually needs managing is that meme tokens fail differently than
+blue-chips, not that they shouldn't be traded at all:
+
+- Liquidity that looks fine today can be gone in hours, not weeks -- the
+  checklist isn't a one-time gate for memes, re-run the liquidity/volume
+  checks (and ideally holder concentration) every single cycle, not just at
+  watchlist-add time.
+- Impersonator tokens reusing a popular ticker/name are extremely common.
+  Mint-address verification (see the checklist above) matters *more* here,
+  not less -- a wrong mint on a meme coin is a much easier mistake to make
+  than on an established blue-chip, precisely because there are more
+  copies floating around.
+- Price action is attention/momentum-driven more than fundamentals-driven.
+  Discovery tools (e.g. CoinGecko `get-trending`) are a legitimate way to
+  surface meme candidates worth researching -- but discovery only ever
+  *proposes*; it never trades directly (`trade-cycle` step 4).
+- Sizing stays smaller (`category_position_fraction_multiplier.meme` in
+  `config/watchlist.yaml`, plus `max_meme_positions` in `config/risk.yaml`)
+  because the *volatility and tail risk per dollar* is higher, which the
+  volatility-scaled sizing formula below already captures quantitatively --
+  the category multiplier is a second, simpler backstop on top of that, not
+  a redundant restriction dressed up as caution.
 
 ## Current strategies (see `backtest/strategies.py`)
 
@@ -87,13 +107,27 @@ holdings, not just at watchlist-add time.
 - **`volatility_breakout`** -- buys new highs with confirming volatility,
   sells new lows. Momentum-continuation; sensitive to lookback tuning and
   false breakouts.
+- **`adaptive_ensemble`** -- regime-aware weighted vote across the three
+  above: mostly trend-following signals when `regime()` detects a real trend
+  (wide fast/slow SMA gap relative to volatility), mostly RSI mean-reversion
+  when it detects chop. This is the default candidate for live use once it
+  clears the bar in "Judging a backtest" below -- not because it's
+  guaranteed better, but because picking one fixed strategy means betting
+  the whole account on the market staying in the regime that strategy likes.
 
-None of these is inherently "the" strategy -- they suit different market
-regimes. That's why `trade-cycle` requires combining signals conservatively
-(step 4) rather than blindly trusting one.
+None of the three base strategies is inherently "the" strategy -- they suit
+different market regimes, which is exactly the problem `adaptive_ensemble`
+and `trade-cycle` step 5's conservative-combination rule are trying to
+manage rather than ignore.
 
 ### Judging a backtest
 
+- **Run `--walk-forward`, not just an in-sample run.** A strategy (or
+  hand-tuned parameters) that only performs on the exact window it was
+  fitted to is fitting noise, not finding an edge. `backtest/run_backtest.py
+  --walk-forward` reports train vs. test separately and flags a large gap as
+  overfit risk -- treat `HIGH` as disqualifying until investigated, not as a
+  number to argue past.
 - Compare against simple buy-and-hold SOL over the same window as a
   baseline. Complexity has to earn its keep.
 - Total return alone is misleading -- weigh it against max drawdown (can the
@@ -105,7 +139,8 @@ regimes. That's why `trade-cycle` requires combining signals conservatively
   P&L. Live fills will differ.
 - Re-run backtests periodically (see `.claude/skills/backtest-strategy`).
   Markets regime-shift; a strategy validated in a trending quarter can fail
-  in a choppy one.
+  in a choppy one -- this is also what the live regime filter (below) is
+  compensating for in real time, not just at backtest time.
 
 ## Position sizing philosophy
 
@@ -114,6 +149,49 @@ amount) means the account naturally compounds winners into slightly larger
 future position sizes and shrinks after losses -- this is deliberate ("keep
 building" from a small base) but is capped hard by `max_position_usd` so a
 lucky streak doesn't concentrate the whole account into one token.
+
+### Volatility-scaled sizing
+
+A flat fraction of the account sized the same into a calm blue-chip and a
+wild meme coin is implicitly taking on far more risk in the meme coin per
+dollar deployed. `config/risk.yaml`'s `target_daily_volatility_pct` +
+`volatility_size_min_mult`/`max_mult` scale the base position size down for
+higher-volatility assets and up (within a cap) for lower-volatility ones, so
+a given trade's *actual risk contribution* stays closer to constant across
+very different assets. See `backtest/strategies.py`'s `realized_vol()` for
+the reference calculation the agent should replicate live.
+
+### Portfolio heat
+
+Per-position stop-losses cap the damage from any *one* position going wrong.
+They don't, by themselves, cap what happens if several correlated positions
+all hit their stops on the same bad day -- which is exactly when it
+happens, since crypto correlations move toward 1 in a broad selloff.
+`max_portfolio_heat_pct` in `config/risk.yaml` caps
+`sum(position_size_usd * stop_loss_pct) / portfolio_value_usd` across *all*
+open positions combined, so the worst-case simultaneous-stop-out loss stays
+bounded independent of how many individually-small positions are open.
+
+### Market regime filter
+
+`regime_filter_enabled` gates **new entries only** (never exits) on whether
+`regime_reference_coin` (BTC by default, as a broad crypto risk barometer)
+is currently trading above its own `regime_sma_window_days`-day SMA. The
+idea: most alt/meme setups that look good on a chart still get dragged down
+in a broad market downturn, so it's not worth opening *new* risk while the
+overall tape is deteriorating, even if a specific token's own signal says
+buy. Existing positions still get managed by their own stop-loss/take-profit
+regardless of regime state.
+
+### Concentration guardrails
+
+`max_meme_positions`, `max_same_ecosystem_positions`, and
+`max_non_stable_exposure_fraction` in `config/risk.yaml` exist because
+several nominally-different tokens can be the same bet in disguise (e.g.
+three different Solana-DeFi governance tokens that all just move with SOL
+beta, or two meme coins that both move on the same broad meme-market
+sentiment). Diversification across tickers isn't real diversification if
+they're all correlated to the same underlying factor.
 
 ## Exit discipline
 

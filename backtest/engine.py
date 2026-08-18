@@ -97,24 +97,26 @@ def load_cached_prices(coin_id: str, days: int) -> list[tuple[int, float]]:
     return [(int(ts), float(price)) for ts, price in payload["prices"]]
 
 
-def run_backtest(coin_id: str, days: int, strategy_fn, fee_bps: float = 30,
-                  slippage_bps: float = 50, **strategy_kwargs) -> BacktestResult:
-    """fee_bps + slippage_bps model realistic Solana swap costs (~0.3% fee is
-    high vs. Jupiter's actual fee-free routing via Phantom, but conservative is
-    safer than optimistic when deciding whether a strategy has real edge)."""
-    series = load_cached_prices(coin_id, days)
+def _simulate(series: list[tuple[int, float]], coin_id: str, strategy_fn, fee_bps: float,
+              slippage_bps: float, start_index: int = 0, **strategy_kwargs) -> BacktestResult:
+    """Core simulation loop. Signals are computed for every bar from index 0
+    (so indicators like SMA30 warm up on real prior history, same as they
+    would live), but trades/equity/drawdown are only *recorded* from
+    start_index onward. That's what makes run_walk_forward's "test" segment a
+    genuine out-of-sample check rather than an indicator-warmup artifact."""
     closes = [p for _, p in series]
     cost_frac = (fee_bps + slippage_bps) / 10_000
 
     result = BacktestResult(strategy=strategy_fn.__name__, coin=coin_id)
     state: dict = {}
     cash = 1.0
-    position = 0.0  # units of the asset, in "cash-equivalent at entry" terms simplified to fraction
     holding = False
     entry_price = None
 
     for i, (ts, price) in enumerate(series):
         signal = strategy_fn(closes, i, state, **strategy_kwargs)
+        if i < start_index:
+            continue  # let indicators warm up without recording trades/equity yet
 
         if signal == "buy" and not holding:
             cash *= (1 - cost_frac)
@@ -144,6 +146,36 @@ def run_backtest(coin_id: str, days: int, strategy_fn, fee_bps: float = 30,
 
     result.ending_equity = cash
     return result
+
+
+def run_backtest(coin_id: str, days: int, strategy_fn, fee_bps: float = 30,
+                  slippage_bps: float = 50, **strategy_kwargs) -> BacktestResult:
+    """fee_bps + slippage_bps model realistic Solana swap costs (~0.3% fee is
+    high vs. Jupiter's actual fee-free routing via Phantom, but conservative is
+    safer than optimistic when deciding whether a strategy has real edge)."""
+    series = load_cached_prices(coin_id, days)
+    return _simulate(series, coin_id, strategy_fn, fee_bps, slippage_bps, start_index=0, **strategy_kwargs)
+
+
+def run_walk_forward(coin_id: str, days: int, strategy_fn, split: float = 0.7, fee_bps: float = 30,
+                      slippage_bps: float = 50, **strategy_kwargs) -> tuple[BacktestResult, BacktestResult]:
+    """Chronological train/test split to catch overfitting: a strategy (or a
+    parameter tuned by hand) that only "works" on the exact window you tested
+    it on is worthless live. `train` simulates on the first `split` fraction
+    of history in isolation; `test` simulates on the full series but only
+    records trades/equity from the split point onward, so its indicators are
+    warmed up on real prior data the same way they would be live -- an honest
+    out-of-sample check, not a lucky in-sample fit.
+
+    See docs/STRATEGY.md "Judging a backtest" for how to read the train vs.
+    test gap."""
+    series = load_cached_prices(coin_id, days)
+    split_index = max(1, int(len(series) * split))
+    train = _simulate(series[:split_index], coin_id, strategy_fn, fee_bps, slippage_bps,
+                       start_index=0, **strategy_kwargs)
+    test = _simulate(series, coin_id, strategy_fn, fee_bps, slippage_bps,
+                      start_index=split_index, **strategy_kwargs)
+    return train, test
 
 
 def format_report(result: BacktestResult) -> str:

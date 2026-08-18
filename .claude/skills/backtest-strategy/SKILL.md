@@ -1,40 +1,49 @@
 ---
 name: backtest-strategy
-description: Fetch historical price data and backtest the trading strategies in backtest/strategies.py against it, producing a report on returns, drawdown, win rate, and Sharpe. Use before enabling a strategy for live autonomous trading, after changing risk.yaml or strategies.py, or whenever the user asks to backtest, evaluate, or validate a trading strategy.
+description: Fetch historical price data and backtest the trading strategies in backtest/strategies.py against it (including an out-of-sample walk-forward check), producing a report on returns, drawdown, win rate, Sharpe, and overfit risk. Use before enabling a strategy for live autonomous trading, after changing risk.yaml or strategies.py, or whenever the user asks to backtest, evaluate, or validate a trading strategy.
 ---
 
 # Backtest a strategy
 
-1. Pick the CoinGecko coin id(s) to test (e.g. `solana`, `jupiter-exchange-solana`,
-   `pyth-network`, `jito-governance-token`, `raydium`). Match these to the
-   watchlist in `config/watchlist.yaml`.
+1. Pick the CoinGecko coin id(s) to test, matched to `config/watchlist.yaml`
+   (e.g. `solana`, `jupiter-exchange-solana`, `pyth-network`,
+   `jito-governance-token`, `raydium`, and any meme-category tokens added).
+   Include `bitcoin` too -- it's the regime-filter reference coin
+   (`config/risk.yaml`'s `regime_reference_coin`), so it's worth knowing how
+   the filter would have behaved over the same window you're backtesting.
 2. Fetch history (skip if a recent cache file already exists in
    `backtest/cache/`):
    ```
    python3 backtest/fetch_history.py --coin <coin-id> --days 180
    ```
-3. Run the comparison:
+3. Run the **walk-forward** comparison (preferred -- catches overfitting):
    ```
-   python3 backtest/run_backtest.py --coin <coin-id> --days 180 --strategy all
+   python3 backtest/run_backtest.py --coin <coin-id> --days 180 --strategy all --walk-forward
    ```
+   A plain in-sample run (no `--walk-forward`) is fine for a first look, but
+   don't trust it alone before going live -- see step 4.
 4. Read the report critically, per `docs/STRATEGY.md` "Judging a backtest":
-   - Total return alone is not enough -- check max drawdown (a strategy that
-     makes 20% but draws down 40% along the way is not "better" for a $50
-     account that has a circuit breaker at -60%) and win rate (a low win rate
-     can still be profitable with a good risk/reward ratio, but combine with
-     the trade log to sanity check).
-   - Compare against buy-and-hold SOL over the same window as a baseline --
-     a strategy that underperforms buy-and-hold after fees usually isn't
-     worth the added complexity and tax/fee drag.
-   - A strategy is only a candidate for live trading in
-     `.claude/skills/trade-cycle/SKILL.md` step 4 if its backtest here is
-     non-negative and the drawdown stays within what `circuit_breaker_floor_usd`
-     in `config/risk.yaml` can absorb.
-5. Save findings: the JSON report is auto-saved to `backtest/results/`. If
-   this changes which strategy the live agent should prefer, update the
-   guidance in `docs/STRATEGY.md`'s "Current strategy" section and say so
-   explicitly to the user -- don't silently change live behavior.
+   - **Overfit risk**: the CLI already flags a large train/test gap. Treat
+     `HIGH` as disqualifying for live use until investigated -- don't just
+     pick the strategy with the best in-sample number.
+   - Total return alone is not enough -- check max drawdown (can
+     `circuit_breaker_floor_usd` in `config/risk.yaml` absorb it?) and win
+     rate (a low win rate can still be profitable with good risk/reward, but
+     cross-check with the trade log).
+   - Compare against simple buy-and-hold over the same window. Complexity
+     has to earn its keep.
+   - `adaptive_ensemble` (regime-aware weighted vote across the other three)
+     is the default candidate for live use once it clears the bar above --
+     but re-validate it the same as any other strategy, not on faith.
+5. A strategy is only a candidate for live trading in
+   `.claude/skills/trade-cycle/SKILL.md` step 5 if its **out-of-sample**
+   result is non-negative, overfit risk isn't flagged HIGH, and the drawdown
+   fits within what the circuit breaker can absorb.
+6. Save findings: the JSON report auto-saves to `backtest/results/`. If this
+   changes which strategy the live agent should prefer, update
+   `docs/STRATEGY.md`'s "Current strategy" section and say so explicitly to
+   the user -- don't silently change live behavior.
 
-Never treat a backtest as a guarantee. Markets regime-shift; re-run this
-periodically (e.g. monthly, or after a stretch of live losses) rather than
-trusting a single historical result indefinitely.
+Never treat a backtest as a guarantee, walk-forward or not. Markets
+regime-shift; re-run this periodically (monthly, or after a stretch of live
+losses) rather than trusting a single historical result indefinitely.

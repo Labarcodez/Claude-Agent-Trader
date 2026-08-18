@@ -13,14 +13,41 @@ enabled: true
 starting_capital_usd: 50
 network: "solana:mainnet"
 
+# ---- Asset classes in scope --------------------------------------------------
+# Solana spot only for now. EVM spot and Hyperliquid perps are intentionally
+# NOT enabled yet (deliberate scope decision -- revisit later).
+asset_classes:
+  solana_spot: {enabled: true}
+  evm_spot: {enabled: false}
+  hyperliquid_perps: {enabled: false}
+
 # ---- Position sizing ---------------------------------------------------------
 # Small accounts lose an outsized share of capital to swap fees + price impact
 # if they split into too many tiny trades. Prefer fewer, higher-conviction
-# positions sized as a fraction of *current* portfolio value, not a fixed $ amount.
+# positions, sized as a fraction of *current* portfolio value with a hard $
+# cap, and scaled by realized volatility (see below) so a calm blue-chip and a
+# wild meme coin aren't sized as if they carried equal risk.
 max_position_fraction: 0.30      # a single position may be at most 30% of current portfolio value
 max_position_usd: 20             # hard $ cap regardless of fraction (guards against growth making sizes too big too fast)
 min_trade_usd: 5                 # don't bother trading below this; fees dominate
 max_concurrent_positions: 3
+
+# Volatility-scaled sizing: scale the base position size up/down against a
+# reference daily volatility, instead of sizing every asset the same.
+#   size_usd = base_size_usd * clamp(target_daily_volatility_pct / realized_20d_volatility_pct,
+#                                     volatility_size_min_mult, volatility_size_max_mult)
+# where realized_20d_volatility_pct is the stdev of the last 20 daily returns (%).
+# See backtest/strategies.py's realized_vol() for the reference implementation.
+target_daily_volatility_pct: 3.0
+volatility_size_min_mult: 0.5
+volatility_size_max_mult: 1.5
+
+# Portfolio heat: total capital genuinely at risk across every open position
+# (position size scaled by its distance to stop-loss), capped independently of
+# the per-position caps above. This is what actually limits damage if several
+# stops fire together during a correlated market-wide drop.
+#   heat = sum(position_size_usd * stop_loss_pct for each open position) / portfolio_value_usd
+max_portfolio_heat_pct: 0.12
 
 # ---- Trade cadence / throughput caps ----------------------------------------
 max_daily_trade_count: 6
@@ -47,9 +74,26 @@ trailing_stop_pct: 0.12          # once in profit, trail a stop 12% below the pe
 circuit_breaker_floor_usd: 20    # 40% of starting capital
 circuit_breaker_daily_loss_pct: 0.25   # or a >25% drawdown in a single UTC day
 
+# ---- Market regime filter (gates NEW entries only -- never gates exits) ----------
+# A simple risk-on/risk-off proxy: only open new positions while the
+# reference coin is trading above its own N-day SMA. Exits, stop-losses, and
+# take-profits are NEVER gated by this -- protecting capital always outranks
+# the regime filter. See backtest/strategies.py's regime() for the same idea
+# applied per-asset (used by the adaptive_ensemble strategy).
+regime_filter_enabled: true
+regime_reference_coin: "bitcoin"
+regime_sma_window_days: 30
+
+# ---- Correlation / concentration guardrails ---------------------------------------
+max_non_stable_exposure_fraction: 0.70   # keep some USDC buffer at all times
+max_meme_positions: 2                    # meme coins are in scope, not excluded -- capped for correlated-liquidity-loss risk, not on principle
+max_same_ecosystem_positions: 3          # e.g. don't hold 3 different Solana-DeFi tokens that all just track SOL beta
+
 # ---- Token safety gate ---------------------------------------------------------
-# A token must pass every check in docs/STRATEGY.md's due-diligence checklist
-# AND appear in config/watchlist.yaml before it can ever be bought. New
-# candidate tokens can be researched and *proposed* (logged), but not traded,
-# until a human adds them to the watchlist.
+# A token must (a) appear in config/watchlist.yaml, (b) have verified: true
+# there (see that file's header), and (c) pass the live liquidity/volume
+# re-check every cycle, before it can ever be bought. New candidates can be
+# researched and *proposed* (logged), never traded, until a human adds them
+# with verified: true.
 require_watchlist_membership: true
+require_verified_flag: true

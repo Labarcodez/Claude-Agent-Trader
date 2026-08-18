@@ -32,9 +32,11 @@ limits.
    `send_solana_transaction`, `portfolio_rebalance`, etc.) without first
    checking `enabled: true` and `state/circuit_breaker.json`'s `tripped`
    status, per `.claude/skills/trade-cycle/SKILL.md`.
-2. **Never trade a token that isn't on `config/watchlist.yaml`.** New
-   candidates get proposed in the journal for a human to add, not traded
-   directly -- see `docs/STRATEGY.md`'s due-diligence checklist.
+2. **Never trade a token that isn't on `config/watchlist.yaml` AND marked
+   `verified: true` there.** New candidates -- including memecoins, which
+   are explicitly in scope -- get proposed in the journal for a human to add
+   and verify, not traded directly. See `docs/STRATEGY.md`'s due-diligence
+   checklist.
 3. **Never commit wallet secrets.** `~/.phantom-mcp/session.json` lives
    outside this repo and must stay there; `.gitignore` also blocks any
    `session.json` and the local `.phantom-mcp/` dir from being added here.

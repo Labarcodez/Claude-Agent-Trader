@@ -26,8 +26,10 @@ a session running on a machine that has completed that auth (see
    report the tripped reason and do not proceed. (A human must investigate,
    fix the underlying cause, and reset the breaker before trading resumes --
    see `docs/RUNBOOK.md` "Recovering from a circuit breaker trip".)
-3. Read `config/watchlist.yaml` -- this is the only set of tokens you may
-   ever buy.
+3. Read `config/watchlist.yaml`. Only entries with `verified: true` are ever
+   tradeable (`require_verified_flag` in risk.yaml) -- treat any
+   `verified: false` entry (including meme coins) as informational only
+   until a human has actually checked the mint address and flipped it.
 
 ## 2. Get current wallet state
 
@@ -53,7 +55,18 @@ cycle.**
 Otherwise, update `peak_portfolio_value_usd` in `state/circuit_breaker.json`
 if the current value is a new high.
 
-## 3. Research
+## 3. Market regime filter (gates new entries only)
+
+If `regime_filter_enabled` in `config/risk.yaml`, fetch
+`regime_reference_coin`'s (default: bitcoin) price history and compute
+whether it's currently above its own `regime_sma_window_days`-day SMA (same
+logic as `backtest/strategies.py`'s `regime()` helper, applied to the
+reference coin). If it's below -- "risk off" -- **do not open any new
+position this cycle**, meme or otherwise. Exits, stop-losses, and
+take-profits on existing positions are never gated by this; protecting
+capital always outranks the regime filter.
+
+## 4. Research
 
 For every token on the watchlist (plus any currently open position even if
 since removed from the watchlist, so it can still be exited):
@@ -64,36 +77,50 @@ since removed from the watchlist, so it can still be exited):
   (no key required) via whatever fetch tool is available.
 - Confirm `min_liquidity_usd` and reasonable 24h volume are still met --
   liquidity can evaporate; re-check every cycle, don't trust the watchlist
-  note alone.
-- For **any token not already on the watchlist** that research surfaces as
-  interesting (e.g. a trending token), do NOT trade it. Run it through the
-  due-diligence checklist in `docs/STRATEGY.md` and log a `"proposal"` entry
-  in the journal recommending the human add it to `config/watchlist.yaml`.
-  `require_watchlist_membership: true` in risk.yaml means this is a hard
-  rule, not a suggestion.
+  note alone. This matters even more for meme-category tokens (see
+  `docs/STRATEGY.md` "Meme coin handling") -- their liquidity can vanish in
+  hours, not weeks.
+- Use a trending/discovery tool (e.g. CoinGecko `get-trending`) as a
+  **candidate-generation** input, including for meme coins -- this is
+  explicitly in scope; the agent may propose any token, including memes,
+  that looks like it can make money. But discovery never skips the gate
+  below: any candidate not already watchlisted and `verified: true` gets
+  logged as a `"proposal"` journal entry with its due-diligence results, not
+  traded, until a human adds and verifies it.
 
-## 4. Generate signals
+## 5. Generate signals
 
-For each watchlist token with enough price history, compute signals using
-the strategies in `backtest/strategies.py` (same logic, applied to live data)
-or a strategy documented in `docs/STRATEGY.md` as validated. **Only use a
-strategy that has a non-negative backtest result on file in
+For each watchlist token with enough price history, compute a signal using
+`backtest/strategies.py`'s `adaptive_ensemble` (preferred once it has a
+non-negative, low-overfit-risk out-of-sample result on file -- see
+`.claude/skills/backtest-strategy`) or another strategy documented in
+`docs/STRATEGY.md` as validated. **Only use a strategy with a non-negative
+out-of-sample (`--walk-forward`) backtest result on file in
 `backtest/results/`** for a similar coin/timeframe -- if none exists, run
-`backtest/fetch_history.py` + `backtest/run_backtest.py` first, or hold.
+the backtest skill first, or hold.
 
-Combine signals across strategies conservatively: a "buy" requires agreement
-(or at least no direct contradiction) from more than one signal source where
-possible; a single strategy's "sell"/stop-loss/take-profit trigger is always
-enough to exit, since protecting capital matters more than confirmation.
+Combine signals across strategies conservatively where more than one is in
+play: a "buy" wants agreement (or at least no direct contradiction); a
+single strategy's sell/stop-loss/take-profit trigger is always enough to
+exit, since protecting capital matters more than confirmation.
 
-## 5. Position sizing & risk checks
+## 6. Position sizing & risk checks
 
 Before proposing any trade, check ALL of:
 
-- [ ] Token is on `config/watchlist.yaml` (or this is an exit of an existing position)
+- [ ] Token is on `config/watchlist.yaml` with `verified: true` (or this is an exit of an existing position)
 - [ ] `max_concurrent_positions` not exceeded (for a new entry)
-- [ ] Position size = `min(max_position_usd, portfolio_value_usd * max_position_fraction * category_multiplier)`,
-      and >= `min_trade_usd` (else skip -- too small to be worth fees)
+- [ ] `max_meme_positions` not exceeded (for a new meme-category entry)
+- [ ] `max_same_ecosystem_positions` not exceeded
+- [ ] `max_non_stable_exposure_fraction` not exceeded after this trade
+- [ ] Regime filter allows new entries (step 3)
+- [ ] Base position size = `min(max_position_usd, portfolio_value_usd * max_position_fraction) * category_multiplier`
+      (category multipliers in `config/watchlist.yaml` -- meme is intentionally smaller: a real chance to make money on a
+      meme coin doesn't require betting a large fraction of the account on it)
+- [ ] Volatility-scaled size = `base_size * clamp(target_daily_volatility_pct / realized_20d_volatility_pct, volatility_size_min_mult, volatility_size_max_mult)`,
+      and this is `>= min_trade_usd` (else skip -- too small to be worth fees)
+- [ ] Adding this position keeps `sum(position_size_usd * stop_loss_pct) / portfolio_value_usd <= max_portfolio_heat_pct`
+      (portfolio heat -- compute across ALL open positions including this candidate)
 - [ ] Today's cumulative trade count < `max_daily_trade_count`
 - [ ] Today's cumulative trade volume + this trade < `max_daily_volume_usd`
 - [ ] At least `min_hours_between_trades_same_token` since the last trade in this token
@@ -102,7 +129,7 @@ Before proposing any trade, check ALL of:
 
 If any check fails, do not trade that signal -- log why and move on.
 
-## 6. Execute
+## 7. Execute
 
 For each trade that passes every check (cap this at a small number per
 cycle -- 1-2 trades is normal; if many signals fire at once, that's a reason
@@ -117,17 +144,18 @@ If a call errors or the fill looks wrong (e.g. price far off the quote),
 stop executing further trades this cycle and log the anomaly clearly --
 do not retry blindly.
 
-## 7. Log
+## 8. Log
 
 Append one entry to `journal/trades.jsonl` per `journal/README.md`'s format,
 covering every token considered this cycle (not just ones traded), the
-risk-check results, and the action taken (including explicit `"hold"`
-entries). Update `state/circuit_breaker.json`'s `peak_portfolio_value_usd`
-if applicable.
+risk-check results (including portfolio heat and regime state), and the
+action taken (including explicit `"hold"` entries). Update
+`state/circuit_breaker.json`'s `peak_portfolio_value_usd` if applicable.
 
-## 8. Report
+## 9. Report
 
 Give the user a short summary: portfolio value before/after, what was
-traded (if anything) and why, current open positions, and whether anything
-needs their attention (a circuit breaker trip, a proposed new watchlist
-token, a repeated execution anomaly).
+traded (if anything) and why, current open positions, current regime state
+and portfolio heat, and whether anything needs their attention (a circuit
+breaker trip, a proposed new watchlist token -- meme or otherwise, a
+repeated execution anomaly).
