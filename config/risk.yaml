@@ -1,0 +1,55 @@
+# Risk configuration for the autonomous trading agent.
+# The trade-cycle skill MUST read this file first, every cycle, before doing
+# anything else. If `enabled: false`, or the circuit breaker has tripped, the
+# skill halts immediately and does not call any Phantom MCP write tool
+# (buy_token, transfer_tokens, send_solana_transaction, portfolio_rebalance).
+
+# ---- Kill switch -----------------------------------------------------------
+# Flip this to false (or delete the file) to stop all autonomous trading.
+# The agent must treat a missing file the same as enabled: false.
+enabled: true
+
+# ---- Capital ----------------------------------------------------------------
+starting_capital_usd: 50
+network: "solana:mainnet"
+
+# ---- Position sizing ---------------------------------------------------------
+# Small accounts lose an outsized share of capital to swap fees + price impact
+# if they split into too many tiny trades. Prefer fewer, higher-conviction
+# positions sized as a fraction of *current* portfolio value, not a fixed $ amount.
+max_position_fraction: 0.30      # a single position may be at most 30% of current portfolio value
+max_position_usd: 20             # hard $ cap regardless of fraction (guards against growth making sizes too big too fast)
+min_trade_usd: 5                 # don't bother trading below this; fees dominate
+max_concurrent_positions: 3
+
+# ---- Trade cadence / throughput caps ----------------------------------------
+max_daily_trade_count: 6
+max_daily_volume_usd: 40
+min_hours_between_trades_same_token: 4
+
+# ---- Execution quality --------------------------------------------------------
+max_slippage_bps: 100            # 1.0% max slippage on any swap
+min_liquidity_usd: 250000        # never trade a token with less on-chain liquidity than this
+max_price_impact_bps: 150        # abort if the quoted price impact exceeds this
+
+# ---- Stop loss / take profit (per position) ----------------------------------
+stop_loss_pct: 0.15              # exit a position down 15% from entry
+take_profit_pct: 0.35            # take profit at +35% from entry
+trailing_stop_pct: 0.12          # once in profit, trail a stop 12% below the peak
+
+# ---- Circuit breaker (portfolio-level) ----------------------------------------
+# If total portfolio value (SOL + all token positions, mark-to-market in USD)
+# falls to or below this floor, the agent must trip the breaker: sell down to
+# stables/SOL is NOT automatic (avoid panic-selling into a wick), but all new
+# entries stop and the human must be notified. Record the trip in
+# state/circuit_breaker.json and refuse to trade until enabled is toggled off
+# and back on by a human AND the breaker file is cleared.
+circuit_breaker_floor_usd: 20    # 40% of starting capital
+circuit_breaker_daily_loss_pct: 0.25   # or a >25% drawdown in a single UTC day
+
+# ---- Token safety gate ---------------------------------------------------------
+# A token must pass every check in docs/STRATEGY.md's due-diligence checklist
+# AND appear in config/watchlist.yaml before it can ever be bought. New
+# candidate tokens can be researched and *proposed* (logged), but not traded,
+# until a human adds them to the watchlist.
+require_watchlist_membership: true

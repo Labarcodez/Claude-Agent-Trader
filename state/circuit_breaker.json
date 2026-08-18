@@ -1,0 +1,8 @@
+{
+  "tripped": false,
+  "tripped_at": null,
+  "reason": null,
+  "portfolio_value_usd_at_trip": null,
+  "peak_portfolio_value_usd": 50,
+  "notes": "Managed by the trade-cycle skill. Do not hand-edit `tripped` to true without also setting reason -- do not hand-edit it to false to resume trading; instead fix the underlying issue and have a human flip config/risk.yaml enabled back on, which the skill treats as the real resume signal."
+}

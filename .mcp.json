@@ -1,0 +1,8 @@
+{
+  "mcpServers": {
+    "phantom": {
+      "command": "npx",
+      "args": ["-y", "@phantom/mcp-server@latest"]
+    }
+  }
+}

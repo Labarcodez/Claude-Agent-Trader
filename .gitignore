@@ -1,0 +1,19 @@
+# Regenerable backtest artifacts -- don't commit stale/misleading data
+backtest/cache/
+backtest/results/
+
+# Local Phantom MCP session (wallet session keys) must NEVER be committed
+.phantom-mcp/
+*session.json
+
+# Trade journal is real trading history -- keep it local by default.
+# Remove this line if you deliberately want to version-control your trade log.
+journal/trades.jsonl
+
+# state/circuit_breaker.json IS tracked (it ships with an initial
+# tripped:false state); it will show as locally modified once the agent
+# starts updating it. That's expected -- commit or not, your call.
+
+__pycache__/
+*.pyc
+.DS_Store

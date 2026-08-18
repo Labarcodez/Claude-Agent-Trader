@@ -1,0 +1,56 @@
+# Allow-listed Solana tokens the agent is permitted to trade.
+# Every entry has already passed the due-diligence checklist in docs/STRATEGY.md
+# as of the date added. The agent should still re-check liquidity/volume live
+# each cycle (markets change), but does NOT need to re-litigate contract safety
+# for tokens already on this list.
+#
+# category: blue_chip | defi | meme
+# meme-category tokens get a smaller max_position_fraction override (see notes)
+# because they are more volatile and more prone to sudden liquidity loss even
+# when currently liquid.
+
+tokens:
+  - symbol: SOL
+    mint: "So11111111111111111111111111111111111111112"
+    category: blue_chip
+    notes: "Native asset. Base of the portfolio; also the settlement asset for swaps."
+
+  - symbol: USDC
+    mint: "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v"
+    category: blue_chip
+    notes: "Stablecoin. Used as the 'cash' / risk-off position between trades."
+
+  - symbol: JUP
+    mint: "JUPyiwrYJFskUPiHa7hkeR8VUtAeFoSYbKedZNsDvCN"
+    category: defi
+    notes: "Jupiter aggregator governance token. Deep liquidity, long track record."
+
+  - symbol: JTO
+    mint: "jtojtomepa8beP8AuQc6eXt5FriJwfFMwQx2v2f9mCL"
+    category: defi
+    notes: "Jito governance token. MEV/staking infra, established liquidity."
+
+  - symbol: PYTH
+    mint: "HZ1JovNiVvGrGNiiYvEozEVgZ58xaU3RKwX8eACQBCt3"
+    category: defi
+    notes: "Pyth Network oracle token."
+
+  - symbol: RAY
+    mint: "4k3Dyjzvzp8eMZWUXbBCjEvwSkkk59S5iCNLY3QrkX6R"
+    category: defi
+    notes: "Raydium DEX token."
+
+# Meme-category example, deliberately capped smaller (see docs/STRATEGY.md
+# "Meme coin handling"). Uncomment and verify mint address freshly before
+# enabling -- meme token mints churn and impersonators are extremely common.
+# - symbol: BONK
+#   mint: "DezXAZ8z7PnrnRJjz3wXBoRgixCa6xjnB7YaB1pPB263"
+#   category: meme
+#   notes: "High volatility. Confirm mint + liquidity + holder concentration fresh each cycle."
+
+# Position sizing overrides by category (fraction of the global
+# max_position_fraction in config/risk.yaml that this category may use):
+category_position_fraction_multiplier:
+  blue_chip: 1.0
+  defi: 0.75
+  meme: 0.4
