@@ -26,10 +26,39 @@ import json
 import time
 import urllib.request
 import urllib.error
+from datetime import datetime, timezone
 from pathlib import Path
 
 CACHE_DIR = Path(__file__).parent / "cache"
 BASE_URL = "https://api.coingecko.com/api/v3"
+
+
+def _resample_to_daily(series: list[list]) -> list[list]:
+    """Collapses a CoinGecko [timestamp_ms, value] series down to one point
+    per UTC calendar day (the last observation of that day = the day's
+    close), regardless of the source granularity.
+
+    Why this exists: CoinGecko's free market_chart endpoint auto-selects
+    granularity by range -- hourly for any days<=90 request, daily only
+    above 90 (verified live: days=90 returns 2,161 hourly points; days=91
+    returns 92 daily points). Every "daily-scale" indicator in this repo
+    (SMA10/30, RSI14, the regime filter's N-day SMA, volatility_breakout's
+    20-bar lookback) assumes each series entry is one day. Left unresampled,
+    a days<=90 request (backtest_all.py's default, paper trading's signal
+    history, and the regime filter's SMA window all request <=90) silently
+    turns a "30-day SMA" into a ~30-*hour* SMA -- wrong by roughly 24x,
+    without erroring or looking obviously broken. Resampling once here, at
+    the source, means every consumer (engine, paper trading, regime filter)
+    gets true daily bars no matter what granularity the API happened to
+    return, instead of each caller needing to know and guard against
+    CoinGecko's range-dependent behavior itself."""
+    if not series:
+        return series
+    by_day: dict[str, list] = {}
+    for point in series:
+        day_key = datetime.fromtimestamp(point[0] / 1000, tz=timezone.utc).strftime("%Y-%m-%d")
+        by_day[day_key] = point  # last observation of the day wins; dict preserves first-seen (chronological) key order
+    return list(by_day.values())
 
 
 def _fetch(url: str) -> dict:
@@ -52,8 +81,12 @@ def _fetch(url: str) -> dict:
 
 def fetch_market_chart(coin_id: str, days: int, vs_currency: str = "usd") -> dict:
     """Returns CoinGecko's market_chart payload: {prices, market_caps, total_volumes},
-    each a list of [unix_ms, value] pairs, looked up by CoinGecko coin id."""
-    return _fetch(f"{BASE_URL}/coins/{coin_id}/market_chart?vs_currency={vs_currency}&days={days}")
+    each a list of [unix_ms, value] pairs, looked up by CoinGecko coin id.
+    Resampled to one point per UTC day regardless of what granularity the API
+    returned -- see _resample_to_daily()."""
+    payload = _fetch(f"{BASE_URL}/coins/{coin_id}/market_chart?vs_currency={vs_currency}&days={days}")
+    return {k: (_resample_to_daily(v) if k in ("prices", "market_caps", "total_volumes") else v)
+            for k, v in payload.items()}
 
 
 def fetch_market_chart_by_contract(contract: str, days: int, platform: str = "solana",
@@ -62,8 +95,11 @@ def fetch_market_chart_by_contract(contract: str, days: int, platform: str = "so
     address instead of a CoinGecko coin id. Works for tokens that were never
     given a curated CoinGecko listing (confirmed live against a same-day
     pump.fun launch) -- this is what makes freshly-discovered tokens
-    backtestable without waiting for CoinGecko to index them by name."""
-    return _fetch(f"{BASE_URL}/coins/{platform}/contract/{contract}/market_chart?vs_currency={vs_currency}&days={days}")
+    backtestable without waiting for CoinGecko to index them by name.
+    Resampled to one point per UTC day -- see _resample_to_daily()."""
+    payload = _fetch(f"{BASE_URL}/coins/{platform}/contract/{contract}/market_chart?vs_currency={vs_currency}&days={days}")
+    return {k: (_resample_to_daily(v) if k in ("prices", "market_caps", "total_volumes") else v)
+            for k, v in payload.items()}
 
 
 def cache_key_for(coin: str | None, contract: str | None, platform: str) -> str:

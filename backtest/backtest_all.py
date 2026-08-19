@@ -102,9 +102,14 @@ def backtest_asset(cache_key: str, days: int) -> list[dict]:
 
 def main():
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    ap.add_argument("--history-days", type=int, default=90,
-                     help="Shorter default than the single-token workflow's 180d -- keeps this comparable across "
-                          "long-established (SOL, BTC) and freshly-discovered tokens that don't have 180d of history yet.")
+    ap.add_argument("--history-days", type=int, default=180,
+                     help="Matches the single-token workflow's default. Was 90, raised after fixing "
+                          "backtest/fetch_history.py's daily-resampling bug (CoinGecko returns hourly data for "
+                          "days<=90, silently making a '30-day SMA' a ~30-hour one) -- with genuinely daily bars, "
+                          "90 days only leaves ~27 test-window days after a 70/30 walk-forward split, too short "
+                          "for a 30-day SMA to show more than one or two real crossovers. Freshly-discovered "
+                          "tokens without 180d of history still work fine (main() already skips/uses whatever "
+                          "history exists if under 20 points).")
     ap.add_argument("--max-candidates", type=int, default=40)
     ap.add_argument("--limit-per-source", type=int, default=15)
     ap.add_argument("--request-delay", type=float, default=0.4)

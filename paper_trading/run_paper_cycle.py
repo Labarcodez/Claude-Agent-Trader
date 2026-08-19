@@ -361,7 +361,12 @@ def main():
     ap.add_argument("--max-candidates", type=int, default=40)
     ap.add_argument("--limit-per-source", type=int, default=15)
     ap.add_argument("--request-delay", type=float, default=0.4)
-    ap.add_argument("--history-days", type=int, default=30)
+    ap.add_argument("--history-days", type=int, default=90,
+                     help="Was 30 -- raised after fixing backtest/fetch_history.py's daily-resampling bug. With "
+                          "genuinely daily bars (previously days<=30 silently returned hourly data from "
+                          "CoinGecko), 30 days barely lets sma_crossover's slow=30 SMA compute once, let alone "
+                          "show a real crossover -- adaptive_ensemble's trend-following legs would almost never "
+                          "fire. 90 days gives them room to actually signal.")
     # mirrors config/risk.yaml -- keep in sync by hand, same convention as research/discover_candidates.py
     ap.add_argument("--max-position-fraction", dest="max_position_fraction", type=float, default=0.30)
     ap.add_argument("--max-position-usd", dest="max_position_usd", type=float, default=20.0)
