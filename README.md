@@ -13,10 +13,12 @@ safety checks (liquidity, holder concentration, mint/freeze authority,
 pool age, confirmed-rug history) before anything is ever eligible to trade --
 memecoins included, sized for their volatility rather than excluded.
 
-Starting point: a small, deliberately-at-risk account (recommended ~$50) that
+Starting point: a small, deliberately-at-risk account -- fund it with
+whatever amount you actually intend to risk, there's no fixed minimum -- that
 the agent trades autonomously, aiming to grow it over time while a
-circuit-breaker and per-trade risk caps bound the downside from bugs or bad
-signals.
+circuit-breaker and per-trade risk caps (sized as a percentage of whatever
+you actually fund, not a hardcoded dollar figure) bound the downside from
+bugs or bad signals.
 
 **This is real money and real, fully autonomous trading. Read
 [`docs/STRATEGY.md`](docs/STRATEGY.md) and

@@ -124,8 +124,13 @@ def _pool_age_hours(first_pool: dict | None) -> float | None:
     if not first_pool or not first_pool.get("createdAt"):
         return None
     try:
-        created = datetime.fromisoformat(first_pool["createdAt"].replace("Z", "+00:00"))
-    except ValueError:
+        created = datetime.fromisoformat(str(first_pool["createdAt"]).replace("Z", "+00:00"))
+    except (ValueError, TypeError, AttributeError):
+        # Fail-safe, not fail-crash: a malformed/unexpected createdAt shape from
+        # Jupiter's API (e.g. a non-string value) must not take down the whole
+        # discovery run over one candidate -- treat it the same as "no age
+        # reported" (evaluate_candidate() then rejects that candidate on the
+        # "can't confirm token age" reason, same as a genuinely missing field).
         return None
     return (datetime.now(timezone.utc) - created).total_seconds() / 3600
 
@@ -146,7 +151,16 @@ def evaluate_candidate(mint: str, tok: dict, args) -> dict:
     symbol = tok.get("symbol", "?")
     liquidity = tok.get("liquidity") or 0
     holders = tok.get("holderCount") or 0
-    mcap = tok.get("mcap") or tok.get("fdv") or 0
+    # Real circulating mcap only -- NOT fdv. FDV (fully diluted valuation)
+    # counts locked/unvested/unminted supply as if it were already circulating,
+    # so a low-float token can show a huge fdv while its real, tradeable market
+    # cap is tiny. Treating fdv as a mcap stand-in would let such a token
+    # falsely qualify for "established"/"blue_chip" tier sizing (a bigger
+    # position multiplier) when it's actually "emerging"-risk. Missing/zero
+    # mcap defaults to 0, which safely falls through to the "emerging" tier
+    # in classify_tier() below rather than overstating it.
+    mcap = tok.get("mcap") or 0
+    fdv = tok.get("fdv") or 0
     audit = tok.get("audit") or {}
     organic_score = tok.get("organicScore")
     top_holder_pct = audit.get("topHoldersPercentage")
@@ -210,6 +224,7 @@ def evaluate_candidate(mint: str, tok: dict, args) -> dict:
             "liquidity_usd": liquidity,
             "holder_count": holders,
             "mcap_usd": mcap,
+            "fdv_usd": fdv,   # reported for context only -- never used for tier classification, see mcap comment above
             "organic_score": organic_score,
             "organic_score_label": tok.get("organicScoreLabel"),
             "top_holder_pct": top_holder_pct,
@@ -227,9 +242,9 @@ def evaluate_candidate(mint: str, tok: dict, args) -> dict:
 
 def main():
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    ap.add_argument("--max-candidates", type=int, default=20,
-                     help="Cap on unique candidates evaluated per run (be a good citizen to free APIs)")
-    ap.add_argument("--limit-per-source", type=int, default=10)
+    ap.add_argument("--max-candidates", type=int, default=40,
+                     help="Cap on unique candidates evaluated per run (be a good citizen to free APIs) -- keep in sync with config/discovery.yaml's max_candidates_per_cycle")
+    ap.add_argument("--limit-per-source", type=int, default=15)
     ap.add_argument("--request-delay", type=float, default=0.4, help="Seconds between RugCheck/DexScreener calls")
     ap.add_argument("--no-organic", action="store_true", help="Skip the toporganicscore source")
     ap.add_argument("--no-trending", action="store_true", help="Skip the toptrending source")

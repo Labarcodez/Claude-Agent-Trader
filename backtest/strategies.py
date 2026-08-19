@@ -78,6 +78,30 @@ def rsi_mean_reversion(closes: list[float], i: int, state: dict, window: int = 1
     return "hold"
 
 
+def rsi_mean_reversion_trend_filtered(closes: list[float], i: int, state: dict, window: int = 14,
+                                       oversold: float = 30, overbought: float = 70, trend_sma: int = 50) -> str:
+    """rsi_mean_reversion plus the trend filter its own docstring names as the
+    fix for its main weakness: RSI can stay "oversold" for a long time during
+    a genuine downtrend (a falling knife), not just during a range-bound dip.
+    Only take the "buy" when price is also above its trend_sma-period SMA --
+    i.e. only mean-revert within an established uptrend/range, not against a
+    real breakdown. Sell signals are never filtered -- exiting a position
+    must never wait on a trend confirmation that protecting capital doesn't
+    need."""
+    window_vals = closes[: i + 1]
+    r = rsi(window_vals, window)
+    if r is None:
+        return "hold"
+    if r >= overbought:
+        return "sell"
+    if r <= oversold:
+        trend = sma(window_vals, trend_sma)
+        if trend is not None and window_vals[-1] < trend:
+            return "hold"  # oversold during a real downtrend -- don't catch the falling knife
+        return "buy"
+    return "hold"
+
+
 def volatility_breakout(closes: list[float], i: int, state: dict, lookback: int = 20,
                          breakout_mult: float = 1.0) -> str:
     """Buy when price breaks above the recent high by more than breakout_mult *
@@ -166,6 +190,7 @@ def adaptive_ensemble(closes: list[float], i: int, state: dict) -> str:
 STRATEGIES = {
     "sma_crossover": sma_crossover,
     "rsi_mean_reversion": rsi_mean_reversion,
+    "rsi_mean_reversion_trend_filtered": rsi_mean_reversion_trend_filtered,
     "volatility_breakout": volatility_breakout,
     "adaptive_ensemble": adaptive_ensemble,
 }

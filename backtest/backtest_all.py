@@ -105,8 +105,8 @@ def main():
     ap.add_argument("--history-days", type=int, default=90,
                      help="Shorter default than the single-token workflow's 180d -- keeps this comparable across "
                           "long-established (SOL, BTC) and freshly-discovered tokens that don't have 180d of history yet.")
-    ap.add_argument("--max-candidates", type=int, default=15)
-    ap.add_argument("--limit-per-source", type=int, default=10)
+    ap.add_argument("--max-candidates", type=int, default=40)
+    ap.add_argument("--limit-per-source", type=int, default=15)
     ap.add_argument("--request-delay", type=float, default=0.4)
     ap.add_argument("--skip-discovery", action="store_true", help="Only backtest SOL + BTC (fast, no discovery pass)")
     # Discovery safety/tier thresholds -- same flags and defaults as

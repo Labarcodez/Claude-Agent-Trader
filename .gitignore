@@ -17,6 +17,13 @@ journal/trades.jsonl
 state/paper_portfolio.json
 journal/paper_trades.jsonl
 
+# Live starting-capital baseline -- created by trade-cycle's first real
+# cycle from the wallet's actual funded balance (see config/risk.yaml
+# "Capital" and trade-cycle SKILL.md step 2). There's no fixed/shipped
+# value for this (no assumed $ amount), so unlike circuit_breaker.json it
+# has nothing meaningful to track before it exists.
+state/starting_capital.json
+
 # state/circuit_breaker.json IS tracked (it ships with an initial
 # tripped:false state); it will show as locally modified once the agent
 # starts updating it. That's expected -- commit or not, your call.

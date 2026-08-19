@@ -47,22 +47,26 @@ excluded via `.gitignore`).
 
 Ask Claude to call the Phantom `get_wallet_addresses` tool to get the
 agent's Solana address. The wallet starts empty -- **you must send it SOL
-before it can do anything.** Send exactly what you intend to risk (per your
-answer: $50 in SOL) from an exchange or your personal wallet to that address.
-Double-check the address (paste it back, don't retype) before sending --
-Solana transactions are irreversible.
+before it can do anything.** Send whatever amount you intend to risk in SOL
+from an exchange or your personal wallet to that address -- there's no
+required or minimum amount; the agent reads the wallet's actual balance on
+its first live cycle and sizes every risk cap off that (see
+`config/risk.yaml`'s "Capital" section). Double-check the address (paste it
+back, don't retype) before sending -- Solana transactions are irreversible.
 
-Leave a small amount of extra SOL beyond the $50 trading capital for network
-fees (a fraction of a cent per tx typically, but don't cut it to zero).
+Leave a small amount of extra SOL beyond your intended trading capital for
+network fees (a fraction of a cent per tx typically, but don't cut it to
+zero).
 
 ## 4. Verify before going live
 
 1. Ask Claude to check the wallet balance (should show your funded SOL).
 2. Run a backtest (`.claude/skills/backtest-strategy`) so there's at least
    one non-negative strategy result on file before the first live trade.
-3. Confirm `config/risk.yaml` has `enabled: true` and the caps reflect what
-   you actually want (defaults assume a $50 account -- see that file's
-   comments).
+3. Confirm `config/risk.yaml` has `enabled: true` and the percentage-based
+   caps reflect what you actually want (they scale automatically to
+   whatever you funded the wallet with -- see that file's "Capital" section
+   comments, no need to hand-tune them for a different account size).
 4. Run one `trade-cycle` manually and read the output/journal entry before
    handing it to a loop/schedule -- see `docs/RUNBOOK.md`.
 

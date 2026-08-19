@@ -3,7 +3,8 @@
 ## First-time setup
 
 1. Follow `docs/PHANTOM_MCP_SETUP.md` end to end (local machine, browser
-   auth, fund the agent's wallet with your $50).
+   auth, fund the agent's wallet with whatever amount you intend to risk --
+   there's no fixed minimum).
 2. Verify SOL and USDC's mint addresses in `config/core_assets.yaml` against
    an authoritative source before trusting them -- these are the only two
    tokens not covered by live discovery's automated checks.
@@ -80,7 +81,7 @@ Once you've validated a manual cycle looks right, use `/loop` (see the
 Pick an interval that matches the strategy's timeframe -- these strategies
 use daily-scale signals (SMA10/30, RSI14), so running every few minutes
 adds cost without adding information. Every 4-12 hours is more sensible for
-a $50 account than every few minutes.
+a small account than every few minutes.
 
 Alternatively, use a Claude Code Remote Routine / cron trigger bound to a
 session running on a machine with Phantom already authenticated, if you want

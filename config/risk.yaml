@@ -10,7 +10,16 @@
 enabled: true
 
 # ---- Capital ----------------------------------------------------------------
-starting_capital_usd: 50
+# There is no fixed minimum or required amount -- fund the wallet with
+# whatever you actually intend to risk. starting_capital_usd is auto-detected
+# from the wallet's real balance the first time trade-cycle runs (see
+# .claude/skills/trade-cycle/SKILL.md step 2) and persisted to
+# state/starting_capital.json so later P&L swings don't reset the baseline.
+# Leave this null -- every dollar cap below (max_position_usd,
+# circuit_breaker_floor_usd, max_daily_volume_usd) is computed as a
+# percentage of whatever that turns out to be (see each field's *_pct
+# sibling), not hardcoded to any specific number like $50.
+starting_capital_usd: null
 network: "solana:mainnet"
 
 # ---- Asset classes in scope --------------------------------------------------
@@ -28,8 +37,9 @@ asset_classes:
 # cap, and scaled by realized volatility (see below) so a calm blue-chip and a
 # wild meme coin aren't sized as if they carried equal risk.
 max_position_fraction: 0.30      # a single position may be at most 30% of current portfolio value
-max_position_usd: 20             # hard $ cap regardless of fraction (guards against growth making sizes too big too fast)
-min_trade_usd: 5                 # don't bother trading below this; fees dominate
+max_position_usd: null           # computed = starting_capital_usd * max_position_usd_pct (see trade-cycle SKILL.md step 2); hard $ cap regardless of fraction
+max_position_usd_pct: 0.40       # cap = 40% of actual starting capital, whatever that turns out to be (guards against growth making sizes too big too fast)
+min_trade_usd: 5                 # don't bother trading below this; fees dominate -- fixed regardless of account size
 max_concurrent_positions: 3
 
 # Volatility-scaled sizing: scale the base position size up/down against a
@@ -51,7 +61,8 @@ max_portfolio_heat_pct: 0.12
 
 # ---- Trade cadence / throughput caps ----------------------------------------
 max_daily_trade_count: 6
-max_daily_volume_usd: 40
+max_daily_volume_usd: null       # computed = starting_capital_usd * max_daily_volume_usd_pct
+max_daily_volume_usd_pct: 0.80   # 80% of actual starting capital
 min_hours_between_trades_same_token: 4
 
 # ---- Execution quality --------------------------------------------------------
@@ -71,7 +82,8 @@ trailing_stop_pct: 0.12          # once in profit, trail a stop 12% below the pe
 # entries stop and the human must be notified. Record the trip in
 # state/circuit_breaker.json and refuse to trade until enabled is toggled off
 # and back on by a human AND the breaker file is cleared.
-circuit_breaker_floor_usd: 20    # 40% of starting capital
+circuit_breaker_floor_usd: null  # computed = starting_capital_usd * circuit_breaker_floor_pct
+circuit_breaker_floor_pct: 0.40  # 40% of actual starting capital
 circuit_breaker_daily_loss_pct: 0.25   # or a >25% drawdown in a single UTC day
 
 # ---- Market regime filter (gates NEW entries only -- never gates exits) ----------

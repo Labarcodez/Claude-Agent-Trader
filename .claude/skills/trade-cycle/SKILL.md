@@ -42,12 +42,33 @@ Use the Phantom MCP tools to get:
 
 Compute `portfolio_value_usd` = sum of all mark-to-market balances.
 
+**Establish starting capital (there is no fixed/required amount -- whatever
+is actually in the wallet is what gets traded):**
+- If `state/starting_capital.json` doesn't exist yet, this is the first live
+  cycle. Set `starting_capital_usd` = the `portfolio_value_usd` you just
+  computed, and write it to `state/starting_capital.json` (e.g.
+  `{"starting_capital_usd": <value>, "captured_at": "<ISO timestamp>"}`) so
+  later P&L swings never silently redefine the baseline. Otherwise, read the
+  persisted value from that file -- do not recompute it from the live
+  balance on every cycle.
+- Derive this cycle's dollar-denominated risk caps from that persisted value
+  and `config/risk.yaml`'s `_pct` siblings (all three are `null` in the YAML
+  by design -- they're computed here, not hardcoded):
+  - `max_position_usd = starting_capital_usd * max_position_usd_pct`
+  - `max_daily_volume_usd = starting_capital_usd * max_daily_volume_usd_pct`
+  - `circuit_breaker_floor_usd = starting_capital_usd * circuit_breaker_floor_pct`
+  Use these computed values everywhere below (step 7, the circuit breaker
+  check) instead of the `null` placeholders in the YAML.
+
 **Check the circuit breaker condition right now, before trading:**
-- If `portfolio_value_usd <= circuit_breaker_floor_usd`, OR
+- If `portfolio_value_usd <= circuit_breaker_floor_usd` (computed above), OR
 - If `portfolio_value_usd` has dropped more than `circuit_breaker_daily_loss_pct`
   from the highest `portfolio_value_usd` recorded in `journal/trades.jsonl`
   within the last 24h (use `state/circuit_breaker.json`'s
-  `peak_portfolio_value_usd` if the journal is empty/unavailable),
+  `peak_portfolio_value_usd` if the journal is empty/unavailable -- if
+  *that* is also `null` because this is the first cycle ever, there is no
+  peak yet: initialize it to the current `portfolio_value_usd` and skip this
+  drawdown-from-peak leg for this cycle only),
 
 then: set `state/circuit_breaker.json` `tripped: true` with a reason and
 `portfolio_value_usd_at_trip`, append a journal entry explaining the trip,
@@ -55,7 +76,7 @@ report it clearly to the user, and **stop -- do not place any trade this
 cycle.**
 
 Otherwise, update `peak_portfolio_value_usd` in `state/circuit_breaker.json`
-if the current value is a new high.
+if the current value is a new high (or it was just initialized above).
 
 ## 3. Discover candidates
 

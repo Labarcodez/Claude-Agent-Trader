@@ -69,6 +69,40 @@ class TestRsiMeanReversion(unittest.TestCase):
         self.assertEqual(strat.rsi_mean_reversion(closes, len(closes) - 1, {}), "hold")
 
 
+class TestRsiMeanReversionTrendFiltered(unittest.TestCase):
+    def test_buy_after_dip_within_an_uptrend(self):
+        # a strong 60-bar ramp, then a choppy-but-net-negative 14-bar tail
+        # (more/bigger down days than up days) -- oversold enough for RSI to
+        # fire, but price stays well above its 50-SMA since the ramp anchors
+        # it high. This is "oversold within an uptrend", the case the filter
+        # is meant to still allow (unlike test_does_not_buy_a_real_downtrend).
+        closes = [100 + i * 3 for i in range(60)]
+        p = closes[-1]
+        for d in [1, -3, 1, -3, 1, -3, 1, -3, 1, -3, 1, -3, 1, -3]:
+            p += d
+            closes.append(p)
+        i = len(closes) - 1
+        self.assertLessEqual(strat.rsi(closes[:i + 1], 14), 30)
+        self.assertGreater(closes[-1], strat.sma(closes[:i + 1], 50))
+        self.assertEqual(strat.rsi_mean_reversion_trend_filtered(closes, i, {}), "buy")
+
+    def test_does_not_buy_a_real_downtrend(self):
+        # a long, real decline -- RSI reads oversold, but price is below its
+        # own 50-SMA the whole way down, so the trend filter must block the buy
+        # rsi_mean_reversion (unfiltered) would take.
+        closes = [100 - i for i in range(60)]
+        self.assertEqual(strat.rsi_mean_reversion(closes, len(closes) - 1, {}), "buy")
+        self.assertEqual(strat.rsi_mean_reversion_trend_filtered(closes, len(closes) - 1, {}), "hold")
+
+    def test_sell_after_sustained_rally_is_never_filtered(self):
+        closes = [100 + i for i in range(20)]
+        self.assertEqual(strat.rsi_mean_reversion_trend_filtered(closes, len(closes) - 1, {}), "sell")
+
+    def test_hold_on_flat_series(self):
+        closes = [100.0] * 60
+        self.assertEqual(strat.rsi_mean_reversion_trend_filtered(closes, len(closes) - 1, {}), "hold")
+
+
 class TestVolatilityBreakout(unittest.TestCase):
     def test_hold_when_insufficient_history(self):
         self.assertEqual(strat.volatility_breakout([100.0] * 5, 4, {}), "hold")

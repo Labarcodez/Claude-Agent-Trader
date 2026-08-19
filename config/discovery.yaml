@@ -20,16 +20,22 @@ sources:
   jupiter_top_organic_score:
     enabled: true
     intervals: ["6h", "24h"]     # "organic" = filtered for wash-traded/bot volume, i.e. real trader interest
-    limit_per_interval: 10
+    limit_per_interval: 15
   jupiter_top_trending:
     enabled: true
     intervals: ["1h", "6h"]
-    limit_per_interval: 10
+    limit_per_interval: 15
   jupiter_recent:
     enabled: true
-    limit: 10                    # newest pools -- highest-risk source; the pool-age gate below is what keeps this safe to include
+    limit: 15                    # newest pools -- highest-risk source; the pool-age gate below is what keeps this safe to include
 
-max_candidates_per_cycle: 20     # cap on unique candidates fully evaluated per run -- be a good citizen to free public APIs
+# Widened from 20 -- with the old cap, real eligible candidates (e.g. a live
+# run that found VINE/TripleT eligible) were sitting past position #15,
+# outside paper_trading's old max-candidates default of 15 -- so breadth was
+# the limiting factor, not safety. 40 doubles evaluation depth while staying
+# well inside "be a good citizen to free public APIs" territory (RugCheck is
+# only spent on stage-1 survivors, per research/discover_candidates.py).
+max_candidates_per_cycle: 40
 
 # Always considered as candidates regardless of whether live discovery
 # surfaces them this cycle. Use this for a token you specifically want kept

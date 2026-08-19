@@ -1,9 +1,12 @@
 # Claude-Agent-Trader
 
 An autonomous Solana trading agent, controlled through Claude Code + Phantom's
-MCP server. It trades a small, deliberately-at-risk account (~$50) toward
-growing that balance over time, using live token discovery, backtested
-strategies, and hard risk limits. There is no hand-maintained token list --
+MCP server. It trades a small, deliberately-at-risk account -- fund it with
+whatever amount you actually intend to risk, there is no fixed minimum --
+toward growing that balance over time, using live token discovery,
+backtested strategies, and hard risk limits scaled to whatever the wallet
+actually holds (see `config/risk.yaml`'s "Capital" section). There is no
+hand-maintained token list --
 the agent finds its own coins every cycle via `research/discover_candidates.py`
 and only trades ones that pass automated, on-chain-backed safety checks.
 

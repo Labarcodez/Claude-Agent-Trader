@@ -358,8 +358,8 @@ def main():
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--reset", action="store_true", help="Wipe paper state and restart at --starting-capital-usd")
     ap.add_argument("--starting-capital-usd", type=float, default=50.0)
-    ap.add_argument("--max-candidates", type=int, default=15)
-    ap.add_argument("--limit-per-source", type=int, default=8)
+    ap.add_argument("--max-candidates", type=int, default=40)
+    ap.add_argument("--limit-per-source", type=int, default=15)
     ap.add_argument("--request-delay", type=float, default=0.4)
     ap.add_argument("--history-days", type=int, default=30)
     # mirrors config/risk.yaml -- keep in sync by hand, same convention as research/discover_candidates.py

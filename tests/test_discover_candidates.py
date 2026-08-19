@@ -191,6 +191,20 @@ class TestTierClassification(unittest.TestCase):
             result = disco.evaluate_candidate("MintAAA", good_token(liquidity=100), make_args())
             self.assertIsNone(result["tier"])
 
+    @patch("research.discover_candidates.fetch_rugcheck_report")
+    def test_large_fdv_does_not_inflate_tier_when_mcap_is_missing(self, mock_rug):
+        """fdv (fully diluted valuation) counts locked/unvested supply as if it
+        were circulating -- a low-float token can show a huge fdv while its real
+        mcap is tiny/unreported. Tier classification must key off mcap only, or
+        such a token gets a bigger position-size multiplier than its actual risk
+        (thin real liquidity/float) warrants."""
+        mock_rug.return_value = {"rugged": False, "risks": []}
+        tok = good_token(mcap=0, fdv=200_000_000, holderCount=20_000, isVerified=True)
+        result = disco.evaluate_candidate("MintAAA", tok, make_args())
+        self.assertEqual(result["tier"], "emerging")
+        self.assertEqual(result["data"]["mcap_usd"], 0)
+        self.assertEqual(result["data"]["fdv_usd"], 200_000_000)
+
 
 class TestPoolAgeHelper(unittest.TestCase):
     def test_none_when_missing(self):
@@ -203,6 +217,13 @@ class TestPoolAgeHelper(unittest.TestCase):
 
     def test_none_for_malformed_date(self):
         self.assertIsNone(disco._pool_age_hours({"createdAt": "not-a-date"}))
+
+    def test_none_for_non_string_created_at_instead_of_raising(self):
+        """A non-string createdAt (e.g. a numeric epoch, or None-like value in
+        an unexpected shape) must degrade to None, not raise -- an uncaught
+        exception here would crash the entire discovery run over one malformed
+        candidate, not just reject that candidate."""
+        self.assertIsNone(disco._pool_age_hours({"createdAt": 1234567890}))
 
 
 if __name__ == "__main__":
