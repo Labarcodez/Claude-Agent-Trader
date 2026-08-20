@@ -61,6 +61,16 @@ def _resample_to_daily(series: list[list]) -> list[list]:
     return list(by_day.values())
 
 
+# 429 (rate limited) and 502/503/504 (bad gateway/unavailable/gateway
+# timeout) are all transient, worth retrying -- unlike a definitive client
+# error, which retrying can't fix. Mirrors RETRYABLE_HTTP_CODES in
+# research/discover_candidates.py's _get_json() (added after RugCheck.xyz
+# returned 502 for otherwise-clean candidates live) -- this file talks to a
+# different upstream (CoinGecko) but is exactly as exposed to the same
+# transient-error class, and previously only retried 429.
+RETRYABLE_HTTP_CODES = {429, 502, 503, 504}
+
+
 def _fetch(url: str, retries: int = 4, base_wait: float = 10.0) -> dict:
     """retries/base_wait are overridable because this function's callers have
     very different patience budgets: a one-off backtest run can afford the
@@ -79,7 +89,7 @@ def _fetch(url: str, retries: int = 4, base_wait: float = 10.0) -> dict:
                 return json.loads(resp.read().decode("utf-8"))
         except urllib.error.HTTPError as e:
             last_err = e
-            if e.code == 429:
+            if e.code in RETRYABLE_HTTP_CODES:
                 wait = base_wait * (attempt + 1)
                 print(f"Rate limited, waiting {wait:.0f}s...")
                 time.sleep(wait)

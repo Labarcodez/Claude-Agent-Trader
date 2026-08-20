@@ -239,20 +239,24 @@ def all_positions_priced(state: dict, prices: dict[str, float]) -> bool:
 
 def _load_regime_cache(reference_coin: str, sma_window_days: int) -> bool | None:
     """Returns the cached regime read if it's for the same coin/window and
-    still fresh, else None (meaning: fetch live)."""
+    still fresh, else None (meaning: fetch live). Fail-safe on ANY parse
+    problem -- a cache file that's valid JSON but missing/malformed fields
+    (partial write, disk issue, manual edit) must degrade to a live fetch,
+    not crash the whole cycle. Verified live: a cache missing computed_at
+    raised an uncaught KeyError here before this guard existed."""
     if not REGIME_CACHE_PATH.exists():
         return None
     try:
         cached = json.loads(REGIME_CACHE_PATH.read_text())
-    except (json.JSONDecodeError, OSError):
+        if cached.get("reference_coin") != reference_coin or cached.get("sma_window_days") != sma_window_days:
+            return None
+        computed_at = datetime.fromisoformat(cached["computed_at"])
+        age_seconds = (datetime.now(timezone.utc) - computed_at).total_seconds()
+        if age_seconds > REGIME_CACHE_TTL_SECONDS:
+            return None
+        return cached["allows_new_entries"]
+    except (json.JSONDecodeError, OSError, KeyError, ValueError, TypeError):
         return None
-    if cached.get("reference_coin") != reference_coin or cached.get("sma_window_days") != sma_window_days:
-        return None
-    computed_at = datetime.fromisoformat(cached["computed_at"])
-    age_seconds = (datetime.now(timezone.utc) - computed_at).total_seconds()
-    if age_seconds > REGIME_CACHE_TTL_SECONDS:
-        return None
-    return cached["allows_new_entries"]
 
 
 def _save_regime_cache(reference_coin: str, sma_window_days: int, allows_new_entries: bool) -> None:
@@ -295,17 +299,20 @@ def _price_history_cache_path(mint: str, days: int) -> Path:
 
 
 def _load_price_history_cache(mint: str, days: int) -> list[float] | None:
+    """Fail-safe on ANY parse problem, not just JSON/OS errors -- see
+    _load_regime_cache()'s docstring for why a malformed-but-valid-JSON cache
+    file must degrade to None (triggering a live fetch) rather than crash."""
     path = _price_history_cache_path(mint, days)
     if not path.exists():
         return None
     try:
         cached = json.loads(path.read_text())
-    except (json.JSONDecodeError, OSError):
+        computed_at = datetime.fromisoformat(cached["computed_at"])
+        if (datetime.now(timezone.utc) - computed_at).total_seconds() > PRICE_HISTORY_CACHE_TTL_SECONDS:
+            return None
+        return cached["closes"]
+    except (json.JSONDecodeError, OSError, KeyError, ValueError, TypeError):
         return None
-    computed_at = datetime.fromisoformat(cached["computed_at"])
-    if (datetime.now(timezone.utc) - computed_at).total_seconds() > PRICE_HISTORY_CACHE_TTL_SECONDS:
-        return None
-    return cached["closes"]
 
 
 def _save_price_history_cache(mint: str, days: int, closes: list[float]) -> None:
@@ -316,13 +323,19 @@ def _save_price_history_cache(mint: str, days: int, closes: list[float]) -> None
     }))
 
 
-def get_price_history_closes(mint: str, days: int) -> list[float] | None:
+def get_price_history_closes(mint: str, days: int, cached: list[float] | None = None) -> list[float] | None:
     """Cached for PRICE_HISTORY_CACHE_TTL_SECONDS per (mint, days) -- with
     several eligible candidates per cycle, this was the dominant source of
     CoinGecko 429 backoff delay (one uncached fetch per candidate, every
     15-minute cycle, for daily closes that don't meaningfully change that
     often). A stale/corrupt cache entry or a genuinely new mint just falls
     through to a live fetch, same as an empty cache.
+
+    Pass `cached` if the caller already did its own _load_price_history_cache()
+    lookup (e.g. to decide whether this fetch counts against a per-cycle
+    budget) -- avoids re-reading and re-parsing the same cache file a second
+    time for no reason. Leave it None to have this function do its own
+    lookup as usual.
 
     Uses an impatient retry policy (2 attempts, 3s base wait -- ~9s worst
     case) instead of fetch_history.py's default (~100s worst case): this
@@ -333,7 +346,8 @@ def get_price_history_closes(mint: str, days: int) -> list[float] | None:
     next cycle (discovery rotation persists), so failing fast costs nothing
     but a delay, unlike a one-off backtest run where the default patience is
     the right call."""
-    cached = _load_price_history_cache(mint, days)
+    if cached is None:
+        cached = _load_price_history_cache(mint, days)
     if cached is not None:
         return cached
     try:
@@ -557,15 +571,15 @@ def run_cycle(args):
             if tier == "emerging" and emerging_open >= args.max_emerging_tier_positions:
                 not_traded[mint] = f"emerging-tier cap reached (max_emerging_tier_positions={args.max_emerging_tier_positions})"
                 continue
-            is_cached = _load_price_history_cache(mint, args.history_days) is not None
-            if not is_cached and fresh_fetches_this_cycle >= MAX_FRESH_PRICE_HISTORY_FETCHES_PER_CYCLE:
+            cached_closes = _load_price_history_cache(mint, args.history_days)
+            if cached_closes is None and fresh_fetches_this_cycle >= MAX_FRESH_PRICE_HISTORY_FETCHES_PER_CYCLE:
                 not_traded[mint] = (f"deferred to a future cycle (hit MAX_FRESH_PRICE_HISTORY_FETCHES_PER_CYCLE="
                                      f"{MAX_FRESH_PRICE_HISTORY_FETCHES_PER_CYCLE} -- bounds cycle duration when "
                                      f"discovery surfaces many never-before-seen candidates at once)")
                 continue
-            if not is_cached:
+            if cached_closes is None:
                 fresh_fetches_this_cycle += 1
-            closes = get_price_history_closes(mint, args.history_days)
+            closes = get_price_history_closes(mint, args.history_days, cached=cached_closes)
             time.sleep(args.request_delay)
             signal = compute_signal(closes) if closes else None
             if signal != "buy" and closes is not None:

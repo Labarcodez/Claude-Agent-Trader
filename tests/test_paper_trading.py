@@ -259,6 +259,25 @@ class TestRegimeCache(unittest.TestCase):
         p.regime_allows_new_entries("bitcoin", 30)
         self.assertEqual(mock_fetch.call_count, 2)
 
+    def test_malformed_but_valid_json_cache_degrades_to_none_not_a_crash(self):
+        """Real bug found live: a cache file that's valid JSON but missing
+        computed_at (partial write, disk issue, manual edit) raised an
+        uncaught KeyError from datetime.fromisoformat(cached["computed_at"]),
+        crashing the whole cycle instead of falling back to a live fetch --
+        the same class of bug already fixed once this session in
+        _pool_age_hours()."""
+        p.REGIME_CACHE_PATH.write_text(json.dumps({
+            "reference_coin": "bitcoin", "sma_window_days": 30, "allows_new_entries": True,
+        }))  # missing computed_at
+        self.assertIsNone(p._load_regime_cache("bitcoin", 30))
+
+    def test_non_iso_computed_at_degrades_to_none_not_a_crash(self):
+        p.REGIME_CACHE_PATH.write_text(json.dumps({
+            "reference_coin": "bitcoin", "sma_window_days": 30, "allows_new_entries": True,
+            "computed_at": "not-a-real-timestamp",
+        }))
+        self.assertIsNone(p._load_regime_cache("bitcoin", 30))
+
 
 class TestPriceHistoryCache(unittest.TestCase):
     """get_price_history_closes() caches per (mint, days) for
@@ -326,6 +345,26 @@ class TestPriceHistoryCache(unittest.TestCase):
         mock_fetch.return_value = {"prices": [[i, 100.0 + i] for i in range(5)]}  # under the 15-point minimum
         result = p.get_price_history_closes("MintA", 90)
         self.assertIsNone(result)
+
+    def test_malformed_but_valid_json_cache_degrades_to_none_not_a_crash(self):
+        """Same real bug as TestRegimeCache's equivalent test, in the sibling
+        cache function."""
+        p._price_history_cache_path("MintA", 90).parent.mkdir(parents=True, exist_ok=True)
+        p._price_history_cache_path("MintA", 90).write_text(json.dumps({"closes": [1.0, 2.0]}))  # missing computed_at
+        self.assertIsNone(p._load_price_history_cache("MintA", 90))
+
+    @patch("backtest.fetch_history.fetch_market_chart_by_contract")
+    def test_caller_supplied_cached_value_skips_the_internal_lookup(self, mock_fetch):
+        """get_price_history_closes(mint, days, cached=...) lets a caller that
+        already did its own _load_price_history_cache() lookup (e.g. to
+        decide whether this fetch counts against a per-cycle budget) pass the
+        result straight through instead of the function re-reading and
+        re-parsing the same cache file a second time."""
+        with patch.object(p, "_load_price_history_cache") as mock_load:
+            result = p.get_price_history_closes("MintA", 90, cached=[1.0, 2.0, 3.0])
+            mock_load.assert_not_called()
+        self.assertEqual(result, [1.0, 2.0, 3.0])
+        mock_fetch.assert_not_called()
         self.assertFalse(p._price_history_cache_path("MintA", 90).exists())
 
 

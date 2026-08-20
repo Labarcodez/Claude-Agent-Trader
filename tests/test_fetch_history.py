@@ -1,10 +1,13 @@
 """Unit tests for backtest/fetch_history.py's daily resampling -- no network
 access (operates on synthetic [timestamp_ms, value] series).
 Run: python3 -m unittest discover -s tests -v"""
+import io
 import sys
 import unittest
+import urllib.error
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
+from unittest.mock import MagicMock, patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 from backtest import fetch_history as fh  # noqa: E402
@@ -48,6 +51,48 @@ class TestResampleToDaily(unittest.TestCase):
         result = fh._resample_to_daily(series)
         self.assertEqual(len(result), 10)
         self.assertEqual([v for _, v in result], [v for _, v in series])
+
+
+class TestFetchRetry(unittest.TestCase):
+    """_fetch() retries transient server errors (429/502/503/504), not just
+    429 -- mirrors RETRYABLE_HTTP_CODES in research/discover_candidates.py's
+    _get_json(), which was broadened after RugCheck.xyz returned 502 for
+    otherwise-clean candidates live. This file talks to a different upstream
+    (CoinGecko) but was exposed to the same gap until fixed here too."""
+
+    def _http_error(self, code):
+        return urllib.error.HTTPError(url="http://x", code=code, msg="err", hdrs=None, fp=io.BytesIO(b""))
+
+    @patch("time.sleep", return_value=None)
+    @patch("urllib.request.urlopen")
+    def test_retries_on_502_then_succeeds(self, mock_urlopen, mock_sleep):
+        success_resp = MagicMock()
+        success_resp.read.return_value = b'{"ok": true}'
+        success_resp.__enter__.return_value = success_resp
+        mock_urlopen.side_effect = [self._http_error(502), success_resp]
+        result = fh._fetch("http://x")
+        self.assertEqual(result, {"ok": True})
+        self.assertEqual(mock_urlopen.call_count, 2)
+
+    @patch("time.sleep", return_value=None)
+    @patch("urllib.request.urlopen")
+    def test_retries_on_503_and_504_too(self, mock_urlopen, mock_sleep):
+        for code in (503, 504):
+            with self.subTest(code=code):
+                success_resp = MagicMock()
+                success_resp.read.return_value = b'{"ok": true}'
+                success_resp.__enter__.return_value = success_resp
+                mock_urlopen.side_effect = [self._http_error(code), success_resp]
+                result = fh._fetch("http://x")
+                self.assertEqual(result, {"ok": True})
+
+    @patch("time.sleep", return_value=None)
+    @patch("urllib.request.urlopen")
+    def test_non_retryable_error_raises_immediately(self, mock_urlopen, mock_sleep):
+        mock_urlopen.side_effect = self._http_error(404)
+        with self.assertRaises(urllib.error.HTTPError):
+            fh._fetch("http://x")
+        self.assertEqual(mock_urlopen.call_count, 1)
 
 
 if __name__ == "__main__":
