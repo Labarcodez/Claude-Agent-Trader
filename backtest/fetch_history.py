@@ -61,43 +61,56 @@ def _resample_to_daily(series: list[list]) -> list[list]:
     return list(by_day.values())
 
 
-def _fetch(url: str) -> dict:
+def _fetch(url: str, retries: int = 4, base_wait: float = 10.0) -> dict:
+    """retries/base_wait are overridable because this function's callers have
+    very different patience budgets: a one-off backtest run can afford the
+    default (up to 4 attempts, 10/20/30/40s backoff, ~100s worst case), but
+    paper_trading/run_paper_cycle.py's opportunistic per-candidate signal
+    fetches run inside a tight 15-minute cron loop, where even a few
+    candidates each hitting worst-case backoff can push a single cycle past
+    a minute or two -- observed live, repeatedly. A candidate paper trading
+    gives up on quickly just gets reconsidered next cycle (discovery
+    rotation persists), so failing fast there costs nothing but a delay."""
     req = urllib.request.Request(url, headers={"User-Agent": "claude-agent-trader/1.0"})
     last_err = None
-    for attempt in range(4):
+    for attempt in range(retries):
         try:
             with urllib.request.urlopen(req, timeout=30) as resp:
                 return json.loads(resp.read().decode("utf-8"))
         except urllib.error.HTTPError as e:
             last_err = e
             if e.code == 429:
-                wait = 10 * (attempt + 1)
-                print(f"Rate limited, waiting {wait}s...")
+                wait = base_wait * (attempt + 1)
+                print(f"Rate limited, waiting {wait:.0f}s...")
                 time.sleep(wait)
                 continue
             raise
     raise last_err
 
 
-def fetch_market_chart(coin_id: str, days: int, vs_currency: str = "usd") -> dict:
+def fetch_market_chart(coin_id: str, days: int, vs_currency: str = "usd",
+                        retries: int = 4, base_wait: float = 10.0) -> dict:
     """Returns CoinGecko's market_chart payload: {prices, market_caps, total_volumes},
     each a list of [unix_ms, value] pairs, looked up by CoinGecko coin id.
     Resampled to one point per UTC day regardless of what granularity the API
-    returned -- see _resample_to_daily()."""
-    payload = _fetch(f"{BASE_URL}/coins/{coin_id}/market_chart?vs_currency={vs_currency}&days={days}")
+    returned -- see _resample_to_daily(). retries/base_wait: see _fetch()."""
+    payload = _fetch(f"{BASE_URL}/coins/{coin_id}/market_chart?vs_currency={vs_currency}&days={days}",
+                      retries=retries, base_wait=base_wait)
     return {k: (_resample_to_daily(v) if k in ("prices", "market_caps", "total_volumes") else v)
             for k, v in payload.items()}
 
 
 def fetch_market_chart_by_contract(contract: str, days: int, platform: str = "solana",
-                                    vs_currency: str = "usd") -> dict:
+                                    vs_currency: str = "usd", retries: int = 4, base_wait: float = 10.0) -> dict:
     """Same payload shape as fetch_market_chart, looked up by token contract/mint
     address instead of a CoinGecko coin id. Works for tokens that were never
     given a curated CoinGecko listing (confirmed live against a same-day
     pump.fun launch) -- this is what makes freshly-discovered tokens
     backtestable without waiting for CoinGecko to index them by name.
-    Resampled to one point per UTC day -- see _resample_to_daily()."""
-    payload = _fetch(f"{BASE_URL}/coins/{platform}/contract/{contract}/market_chart?vs_currency={vs_currency}&days={days}")
+    Resampled to one point per UTC day -- see _resample_to_daily().
+    retries/base_wait: see _fetch()."""
+    payload = _fetch(f"{BASE_URL}/coins/{platform}/contract/{contract}/market_chart?vs_currency={vs_currency}&days={days}",
+                      retries=retries, base_wait=base_wait)
     return {k: (_resample_to_daily(v) if k in ("prices", "market_caps", "total_volumes") else v)
             for k, v in payload.items()}
 

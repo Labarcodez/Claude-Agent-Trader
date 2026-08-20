@@ -290,6 +290,19 @@ class TestPriceHistoryCache(unittest.TestCase):
         self.assertEqual(closes1, closes2)
 
     @patch("backtest.fetch_history.fetch_market_chart_by_contract")
+    def test_uses_an_impatient_retry_policy_not_the_backtest_default(self, mock_fetch):
+        """This runs inside a tight 15-minute cron loop, not a one-off
+        backtest -- fetch_history.py's default retry policy (~100s worst
+        case) repeatedly cost whole cycles 1m40s+ once several candidates
+        each hit it. A candidate this gives up on quickly just gets
+        reconsidered next cycle, so failing fast here is the right trade."""
+        mock_fetch.return_value = {"prices": [[i, 100.0 + i] for i in range(20)]}
+        p.get_price_history_closes("MintA", 90)
+        _, kwargs = mock_fetch.call_args
+        self.assertLessEqual(kwargs.get("retries", 4), 2)
+        self.assertLessEqual(kwargs.get("base_wait", 10.0), 3.0)
+
+    @patch("backtest.fetch_history.fetch_market_chart_by_contract")
     def test_different_mint_is_not_served_from_another_mints_cache(self, mock_fetch):
         mock_fetch.return_value = {"prices": [[i, 100.0 + i] for i in range(20)]}
         p.get_price_history_closes("MintA", 90)

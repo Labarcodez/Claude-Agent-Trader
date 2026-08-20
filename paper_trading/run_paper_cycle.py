@@ -322,12 +322,22 @@ def get_price_history_closes(mint: str, days: int) -> list[float] | None:
     CoinGecko 429 backoff delay (one uncached fetch per candidate, every
     15-minute cycle, for daily closes that don't meaningfully change that
     often). A stale/corrupt cache entry or a genuinely new mint just falls
-    through to a live fetch, same as an empty cache."""
+    through to a live fetch, same as an empty cache.
+
+    Uses an impatient retry policy (2 attempts, 3s base wait -- ~9s worst
+    case) instead of fetch_history.py's default (~100s worst case): this
+    runs inside a tight 15-minute cron loop where MAX_FRESH_PRICE_HISTORY_
+    FETCHES_PER_CYCLE candidates each hitting the patient default could
+    still add up to several minutes even after that cap -- observed live,
+    repeatedly. A candidate this gives up on quickly just gets reconsidered
+    next cycle (discovery rotation persists), so failing fast costs nothing
+    but a delay, unlike a one-off backtest run where the default patience is
+    the right call."""
     cached = _load_price_history_cache(mint, days)
     if cached is not None:
         return cached
     try:
-        payload = fh.fetch_market_chart_by_contract(mint, days=days)
+        payload = fh.fetch_market_chart_by_contract(mint, days=days, retries=2, base_wait=3.0)
     except Exception:
         return None
     prices = payload.get("prices") or []
