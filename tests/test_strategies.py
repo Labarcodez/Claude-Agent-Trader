@@ -147,6 +147,39 @@ class TestAdaptiveEnsemble(unittest.TestCase):
         self.assertNotEqual(strat.adaptive_ensemble(closes, len(closes) - 1, {}), "buy")
 
 
+class TestAdaptiveEnsembleFast(unittest.TestCase):
+    """adaptive_ensemble_fast shares adaptive_ensemble's logic with roughly
+    half the lookback windows -- same behavioral guarantees should hold, just
+    reacting sooner (see backtest/strategies.py's docstring for the
+    short-lived/high-volatility-asset hypothesis this variant tests)."""
+
+    def test_returns_a_valid_signal(self):
+        closes = [100.0 + (i % 5) for i in range(50)]
+        sig = strat.adaptive_ensemble_fast(closes, len(closes) - 1, {})
+        self.assertIn(sig, ("buy", "sell", "hold"))
+
+    def test_hold_on_perfectly_flat_series(self):
+        closes = [100.0] * 50
+        self.assertEqual(strat.adaptive_ensemble_fast(closes, len(closes) - 1, {}), "hold")
+
+    def test_does_not_blindly_buy_a_real_downtrend(self):
+        closes = [100.0] * 20 + [100 - i for i in range(20)]
+        self.assertNotEqual(strat.adaptive_ensemble_fast(closes, len(closes) - 1, {}), "buy")
+
+    def test_reacts_at_least_as_fast_as_the_original_on_a_sharp_reversal(self):
+        # A short decline followed by a sharp, sustained recovery -- shorter
+        # windows should recognize the new uptrend no later than the original
+        # 10/30 windows do, since that's the entire point of this variant.
+        closes = [100.0 - i for i in range(15)] + [85.0 + i * 2 for i in range(20)]
+        fast_signals = [strat.adaptive_ensemble_fast(closes, i, {}) for i in range(len(closes))]
+        original_signals = [strat.adaptive_ensemble(closes, i, {}) for i in range(len(closes))]
+        first_fast_buy = next((i for i, s in enumerate(fast_signals) if s == "buy"), None)
+        first_original_buy = next((i for i, s in enumerate(original_signals) if s == "buy"), None)
+        self.assertIsNotNone(first_fast_buy, "fast variant never bought the recovery")
+        if first_original_buy is not None:
+            self.assertLessEqual(first_fast_buy, first_original_buy)
+
+
 class TestSTRATEGIESRegistry(unittest.TestCase):
     def test_all_registered_strategies_are_callable_and_return_valid_signals(self):
         closes = [100.0 + (i % 7) * 1.5 for i in range(60)]

@@ -42,12 +42,27 @@ from pathlib import Path
 REPO_ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(REPO_ROOT))
 
+# See research/discover_candidates.py for why: discovered symbols can contain
+# Unicode a narrow Windows console codepage can't print, which otherwise crashes
+# an autonomous cycle on a print() after all the real work is already done.
+for _stream in (sys.stdout, sys.stderr):
+    if hasattr(_stream, "reconfigure"):
+        _stream.reconfigure(encoding="utf-8", errors="replace")
+
 from research import discover_candidates as disco  # noqa: E402
 from backtest import fetch_history as fh  # noqa: E402
 from backtest import strategies as strat  # noqa: E402
 
 STATE_PATH = REPO_ROOT / "state" / "paper_portfolio.json"
 JOURNAL_PATH = REPO_ROOT / "journal" / "paper_trades.jsonl"
+REGIME_CACHE_PATH = REPO_ROOT / "state" / "regime_cache.json"
+REGIME_CACHE_TTL_SECONDS = 3600  # regime is a daily-scale (30d SMA) signal -- refetching every 15min cycle is
+                                  # unnecessary load on CoinGecko's free tier for no real freshness gain
+PRICE_HISTORY_CACHE_DIR = REPO_ROOT / "state" / "price_history_cache"
+PRICE_HISTORY_CACHE_TTL_SECONDS = 3600  # same reasoning as the regime cache: a mint's daily closes barely
+                                          # change within 15 minutes, but signal generation re-fetches every
+                                          # eligible candidate's history every cycle -- the dominant source of
+                                          # CoinGecko rate-limit backoff once discovery finds several candidates
 
 TIER_MULTIPLIERS = {"blue_chip": 1.0, "established": 0.7, "emerging": 0.4}
 
@@ -84,14 +99,37 @@ def append_journal(entry: dict) -> None:
 
 # ---- Pricing ------------------------------------------------------------------
 
+CHUNK_SIZE = 25  # keep each search URL a safe length; Jupiter's search accepts a comma-separated query
+
+
+def current_prices(mints: list[str]) -> dict[str, float]:
+    """Live USD prices for many mints in as few Jupiter search calls as
+    possible -- verified live that /search?query=<mint1>,<mint2>,... returns
+    all matches in one response, instead of one call per mint. This replaced
+    a one-call-per-mint loop that was hitting 429s on nearly every cycle
+    (N sequential requests, 0.4s apart, against a free endpoint) -- batching
+    cuts that to ceil(N/25) requests per cycle. Works uniformly for core
+    assets, discovered candidates, and existing positions; a mint Jupiter's
+    search doesn't match (e.g. delisted/unindexed) is simply absent from the
+    returned dict, same as the old per-mint version returning None for it."""
+    prices: dict[str, float] = {}
+    unique_mints = list(dict.fromkeys(mints))  # de-dupe, keep order
+    for i in range(0, len(unique_mints), CHUNK_SIZE):
+        chunk = unique_mints[i:i + CHUNK_SIZE]
+        results = disco._get_json(f"{disco.JUPITER_BASE}/search?query=" + ",".join(chunk))
+        chunk_set = set(chunk)
+        for r in results or []:
+            mid = r.get("id")
+            if mid in chunk_set and r.get("usdPrice") is not None:
+                prices[mid] = r["usdPrice"]
+    return prices
+
+
 def current_price(mint: str) -> float | None:
-    """Live USD price for any mint, via Jupiter's search endpoint -- works for
-    core assets, discovered candidates, and existing positions uniformly."""
-    results = disco._get_json(f"{disco.JUPITER_BASE}/search?query={mint}")
-    for r in results or []:
-        if r.get("id") == mint:
-            return r.get("usdPrice")
-    return None
+    """Single-mint convenience wrapper around current_prices() -- prefer
+    calling current_prices() directly with a full list when pricing more
+    than one mint, to get the batching benefit."""
+    return current_prices([mint]).get(mint)
 
 
 def portfolio_value_usd(state: dict, prices: dict[str, float]) -> float:
@@ -105,7 +143,43 @@ def portfolio_value_usd(state: dict, prices: dict[str, float]) -> float:
 
 # ---- Regime filter ------------------------------------------------------------
 
+def _load_regime_cache(reference_coin: str, sma_window_days: int) -> bool | None:
+    """Returns the cached regime read if it's for the same coin/window and
+    still fresh, else None (meaning: fetch live)."""
+    if not REGIME_CACHE_PATH.exists():
+        return None
+    try:
+        cached = json.loads(REGIME_CACHE_PATH.read_text())
+    except (json.JSONDecodeError, OSError):
+        return None
+    if cached.get("reference_coin") != reference_coin or cached.get("sma_window_days") != sma_window_days:
+        return None
+    computed_at = datetime.fromisoformat(cached["computed_at"])
+    age_seconds = (datetime.now(timezone.utc) - computed_at).total_seconds()
+    if age_seconds > REGIME_CACHE_TTL_SECONDS:
+        return None
+    return cached["allows_new_entries"]
+
+
+def _save_regime_cache(reference_coin: str, sma_window_days: int, allows_new_entries: bool) -> None:
+    REGIME_CACHE_PATH.parent.mkdir(parents=True, exist_ok=True)
+    REGIME_CACHE_PATH.write_text(json.dumps({
+        "reference_coin": reference_coin,
+        "sma_window_days": sma_window_days,
+        "allows_new_entries": allows_new_entries,
+        "computed_at": datetime.now(timezone.utc).isoformat(),
+    }))
+
+
 def regime_allows_new_entries(reference_coin: str, sma_window_days: int) -> bool:
+    """A 30-day SMA doesn't meaningfully change within a 15-minute paper-cycle
+    interval, so this is cached for REGIME_CACHE_TTL_SECONDS instead of hit
+    live every cycle -- cuts CoinGecko calls roughly 4x (once/hour instead of
+    once/15min) with no real loss of decision quality, and reduces the 429
+    backoff delays that were adding ~60s to nearly every cycle."""
+    cached = _load_regime_cache(reference_coin, sma_window_days)
+    if cached is not None:
+        return cached
     try:
         payload = fh.fetch_market_chart(reference_coin, days=sma_window_days + 5)
     except Exception as e:
@@ -115,12 +189,49 @@ def regime_allows_new_entries(reference_coin: str, sma_window_days: int) -> bool
     if len(closes) < sma_window_days:
         return False
     sma = sum(closes[-sma_window_days:]) / sma_window_days
-    return closes[-1] > sma
+    result = closes[-1] > sma
+    _save_regime_cache(reference_coin, sma_window_days, result)
+    return result
 
 
 # ---- Signal generation --------------------------------------------------------
 
+def _price_history_cache_path(mint: str, days: int) -> Path:
+    return PRICE_HISTORY_CACHE_DIR / f"{mint}_{days}d.json"
+
+
+def _load_price_history_cache(mint: str, days: int) -> list[float] | None:
+    path = _price_history_cache_path(mint, days)
+    if not path.exists():
+        return None
+    try:
+        cached = json.loads(path.read_text())
+    except (json.JSONDecodeError, OSError):
+        return None
+    computed_at = datetime.fromisoformat(cached["computed_at"])
+    if (datetime.now(timezone.utc) - computed_at).total_seconds() > PRICE_HISTORY_CACHE_TTL_SECONDS:
+        return None
+    return cached["closes"]
+
+
+def _save_price_history_cache(mint: str, days: int, closes: list[float]) -> None:
+    PRICE_HISTORY_CACHE_DIR.mkdir(parents=True, exist_ok=True)
+    _price_history_cache_path(mint, days).write_text(json.dumps({
+        "closes": closes,
+        "computed_at": datetime.now(timezone.utc).isoformat(),
+    }))
+
+
 def get_price_history_closes(mint: str, days: int) -> list[float] | None:
+    """Cached for PRICE_HISTORY_CACHE_TTL_SECONDS per (mint, days) -- with
+    several eligible candidates per cycle, this was the dominant source of
+    CoinGecko 429 backoff delay (one uncached fetch per candidate, every
+    15-minute cycle, for daily closes that don't meaningfully change that
+    often). A stale/corrupt cache entry or a genuinely new mint just falls
+    through to a live fetch, same as an empty cache."""
+    cached = _load_price_history_cache(mint, days)
+    if cached is not None:
+        return cached
     try:
         payload = fh.fetch_market_chart_by_contract(mint, days=days)
     except Exception:
@@ -128,7 +239,9 @@ def get_price_history_closes(mint: str, days: int) -> list[float] | None:
     prices = payload.get("prices") or []
     if len(prices) < 15:  # not enough for even the fastest indicator to warm up meaningfully
         return None
-    return [p for _, p in prices]
+    closes = [p for _, p in prices]
+    _save_price_history_cache(mint, days, closes)
+    return closes
 
 
 def compute_signal(closes: list[float]) -> str:
@@ -204,12 +317,7 @@ def run_cycle(args):
     for mint in disco.CORE_ASSET_MINTS:
         tracked_mints.discard(mint)
 
-    prices: dict[str, float] = {}
-    for mint in tracked_mints | disco.CORE_ASSET_MINTS:
-        time.sleep(args.request_delay)
-        price = current_price(mint)
-        if price is not None:
-            prices[mint] = price
+    prices = current_prices(list(tracked_mints | disco.CORE_ASSET_MINTS))
 
     port_value = portfolio_value_usd(state, prices)
     if port_value > state["peak_portfolio_value_usd"]:
@@ -303,9 +411,11 @@ def run_cycle(args):
                 emerging_open += 1
 
     final_prices = dict(prices)
-    for mint in state["positions"]:
-        if mint not in final_prices:
-            final_prices[mint] = current_price(mint) or prices.get(mint, 0)
+    missing = [mint for mint in state["positions"] if mint not in final_prices]
+    if missing:
+        final_prices.update(current_prices(missing))
+        for mint in missing:
+            final_prices.setdefault(mint, prices.get(mint, 0))
     final_value = portfolio_value_usd(state, final_prices)
     state["cycles_run"] += 1
     save_state(state)
@@ -391,7 +501,7 @@ def main():
     ap.add_argument("--min-holder-count", dest="min_holder_count", type=int, default=500)
     ap.add_argument("--min-organic-score", dest="min_organic_score", type=float, default=40)
     ap.add_argument("--min-pool-age-hours", dest="min_pool_age_hours", type=float, default=72)
-    ap.add_argument("--max-top-holder-pct", dest="max_top_holder_pct", type=float, default=20.0)
+    ap.add_argument("--max-top-holder-pct", dest="max_top_holder_pct", type=float, default=22.0)
     ap.add_argument("--blue-chip-mcap-usd", dest="blue_chip_mcap_usd", type=float, default=50_000_000)
     ap.add_argument("--blue-chip-holder-count", dest="blue_chip_holder_count", type=int, default=10_000)
     ap.add_argument("--established-mcap-usd", dest="established_mcap_usd", type=float, default=5_000_000)

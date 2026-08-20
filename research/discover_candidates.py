@@ -37,6 +37,14 @@ import urllib.error
 from datetime import datetime, timezone
 from pathlib import Path
 
+# Discovered token symbols can contain arbitrary Unicode (scam/spam tokens routinely
+# use lookalike characters); Windows consoles default to a narrow codepage (cp1252)
+# that can't encode most of it, which otherwise crashes this script mid-run -- after
+# the expensive discovery/RugCheck work is already done -- on nothing but a print().
+for _stream in (sys.stdout, sys.stderr):
+    if hasattr(_stream, "reconfigure"):
+        _stream.reconfigure(encoding="utf-8", errors="replace")
+
 JUPITER_BASE = "https://api.jup.ag/tokens/v2"
 RUGCHECK_BASE = "https://api.rugcheck.xyz/v1"
 DEXSCREENER_BASE = "https://api.dexscreener.com/latest/dex"
@@ -258,7 +266,7 @@ def main():
     ap.add_argument("--min-holder-count", type=int, default=500)
     ap.add_argument("--min-pool-age-hours", type=float, default=72)
     ap.add_argument("--min-organic-score", type=float, default=40)
-    ap.add_argument("--max-top-holder-pct", type=float, default=20.0)
+    ap.add_argument("--max-top-holder-pct", type=float, default=22.0)
     ap.add_argument("--require-mint-renounced", dest="require_mint_renounced", action="store_true", default=True)
     ap.add_argument("--allow-mint-authority", dest="require_mint_renounced", action="store_false")
     ap.add_argument("--require-freeze-renounced", dest="require_freeze_renounced", action="store_true", default=True)

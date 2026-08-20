@@ -2,9 +2,12 @@
 -- synthetic state and price dicts, no network calls, no state file I/O.
 Run: python3 -m unittest discover -s tests -v"""
 import argparse
+import json
 import sys
 import unittest
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
+from unittest.mock import patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 from paper_trading import run_paper_cycle as p  # noqa: E402
@@ -110,6 +113,152 @@ class TestSizePosition(unittest.TestCase):
         flat = [100.0] * 25
         size = p.size_position("blue_chip", 100.0, flat, args)
         self.assertLessEqual(size, 100.0 * 0.1 + 1e-9)
+
+
+class TestRegimeCache(unittest.TestCase):
+    """regime_allows_new_entries() caches its result for
+    REGIME_CACHE_TTL_SECONDS instead of hitting CoinGecko every paper cycle
+    -- a 30-day SMA doesn't meaningfully change in 15 minutes, and this was a
+    real fix for CoinGecko 429s that were adding ~60s of backoff to nearly
+    every cycle."""
+
+    def setUp(self):
+        self._orig_path = p.REGIME_CACHE_PATH
+        p.REGIME_CACHE_PATH = Path(__file__).resolve().parent / "_tmp_regime_cache_test.json"
+        if p.REGIME_CACHE_PATH.exists():
+            p.REGIME_CACHE_PATH.unlink()
+
+    def tearDown(self):
+        if p.REGIME_CACHE_PATH.exists():
+            p.REGIME_CACHE_PATH.unlink()
+        p.REGIME_CACHE_PATH = self._orig_path
+
+    @patch("backtest.fetch_history.fetch_market_chart")
+    def test_fetches_live_on_empty_cache_then_caches_it(self, mock_fetch):
+        mock_fetch.return_value = {"prices": [[i, 100.0 + i] for i in range(40)]}
+        result1 = p.regime_allows_new_entries("bitcoin", 30)
+        result2 = p.regime_allows_new_entries("bitcoin", 30)
+        self.assertEqual(mock_fetch.call_count, 1, "second call within TTL should use the cache, not refetch")
+        self.assertEqual(result1, result2)
+
+    @patch("backtest.fetch_history.fetch_market_chart")
+    def test_different_reference_coin_bypasses_stale_cache_entry(self, mock_fetch):
+        mock_fetch.return_value = {"prices": [[i, 100.0 + i] for i in range(40)]}
+        p.regime_allows_new_entries("bitcoin", 30)
+        p.regime_allows_new_entries("ethereum", 30)
+        self.assertEqual(mock_fetch.call_count, 2, "a different coin must not reuse another coin's cached read")
+
+    @patch("backtest.fetch_history.fetch_market_chart")
+    def test_expired_cache_entry_triggers_a_refetch(self, mock_fetch):
+        mock_fetch.return_value = {"prices": [[i, 100.0 + i] for i in range(40)]}
+        p.regime_allows_new_entries("bitcoin", 30)
+        # backdate the cache past the TTL
+        cached = json.loads(p.REGIME_CACHE_PATH.read_text())
+        stale = datetime.now(timezone.utc) - timedelta(seconds=p.REGIME_CACHE_TTL_SECONDS + 1)
+        cached["computed_at"] = stale.isoformat()
+        p.REGIME_CACHE_PATH.write_text(json.dumps(cached))
+        p.regime_allows_new_entries("bitcoin", 30)
+        self.assertEqual(mock_fetch.call_count, 2)
+
+
+class TestPriceHistoryCache(unittest.TestCase):
+    """get_price_history_closes() caches per (mint, days) for
+    PRICE_HISTORY_CACHE_TTL_SECONDS -- with several eligible candidates per
+    cycle, this was the dominant source of CoinGecko 429 backoff (one
+    uncached fetch per candidate, every 15-minute cycle)."""
+
+    def setUp(self):
+        self._orig_dir = p.PRICE_HISTORY_CACHE_DIR
+        p.PRICE_HISTORY_CACHE_DIR = Path(__file__).resolve().parent / "_tmp_price_history_cache_test"
+        if p.PRICE_HISTORY_CACHE_DIR.exists():
+            for f in p.PRICE_HISTORY_CACHE_DIR.iterdir():
+                f.unlink()
+            p.PRICE_HISTORY_CACHE_DIR.rmdir()
+
+    def tearDown(self):
+        if p.PRICE_HISTORY_CACHE_DIR.exists():
+            for f in p.PRICE_HISTORY_CACHE_DIR.iterdir():
+                f.unlink()
+            p.PRICE_HISTORY_CACHE_DIR.rmdir()
+        p.PRICE_HISTORY_CACHE_DIR = self._orig_dir
+
+    @patch("backtest.fetch_history.fetch_market_chart_by_contract")
+    def test_second_call_within_ttl_skips_the_network(self, mock_fetch):
+        mock_fetch.return_value = {"prices": [[i, 100.0 + i] for i in range(20)]}
+        closes1 = p.get_price_history_closes("MintA", 90)
+        closes2 = p.get_price_history_closes("MintA", 90)
+        self.assertEqual(mock_fetch.call_count, 1)
+        self.assertEqual(closes1, closes2)
+
+    @patch("backtest.fetch_history.fetch_market_chart_by_contract")
+    def test_different_mint_is_not_served_from_another_mints_cache(self, mock_fetch):
+        mock_fetch.return_value = {"prices": [[i, 100.0 + i] for i in range(20)]}
+        p.get_price_history_closes("MintA", 90)
+        p.get_price_history_closes("MintB", 90)
+        self.assertEqual(mock_fetch.call_count, 2)
+
+    @patch("backtest.fetch_history.fetch_market_chart_by_contract")
+    def test_expired_cache_entry_triggers_a_refetch(self, mock_fetch):
+        mock_fetch.return_value = {"prices": [[i, 100.0 + i] for i in range(20)]}
+        p.get_price_history_closes("MintA", 90)
+        cache_path = p._price_history_cache_path("MintA", 90)
+        cached = json.loads(cache_path.read_text())
+        stale = datetime.now(timezone.utc) - timedelta(seconds=p.PRICE_HISTORY_CACHE_TTL_SECONDS + 1)
+        cached["computed_at"] = stale.isoformat()
+        cache_path.write_text(json.dumps(cached))
+        p.get_price_history_closes("MintA", 90)
+        self.assertEqual(mock_fetch.call_count, 2)
+
+    @patch("backtest.fetch_history.fetch_market_chart_by_contract")
+    def test_insufficient_history_is_not_cached(self, mock_fetch):
+        mock_fetch.return_value = {"prices": [[i, 100.0 + i] for i in range(5)]}  # under the 15-point minimum
+        result = p.get_price_history_closes("MintA", 90)
+        self.assertIsNone(result)
+        self.assertFalse(p._price_history_cache_path("MintA", 90).exists())
+
+
+class TestCurrentPrices(unittest.TestCase):
+    """current_prices() batches N mints into as few Jupiter /search calls as
+    possible instead of one call per mint -- this was a real fix (see
+    CHUNK_SIZE) for 429s that were firing on nearly every paper cycle from a
+    one-request-per-mint loop against a free, rate-limited endpoint."""
+
+    @patch("research.discover_candidates._get_json")
+    def test_single_batched_call_for_mints_under_chunk_size(self, mock_get):
+        mock_get.return_value = [
+            {"id": "MintA", "symbol": "AAA", "usdPrice": 1.5},
+            {"id": "MintB", "symbol": "BBB", "usdPrice": 2.5},
+        ]
+        prices = p.current_prices(["MintA", "MintB"])
+        self.assertEqual(mock_get.call_count, 1, "should be one batched call, not one per mint")
+        self.assertEqual(prices, {"MintA": 1.5, "MintB": 2.5})
+
+    @patch("research.discover_candidates._get_json")
+    def test_chunks_when_more_mints_than_chunk_size(self, mock_get):
+        mock_get.return_value = []
+        mints = [f"Mint{i}" for i in range(p.CHUNK_SIZE + 5)]
+        p.current_prices(mints)
+        expected_chunks = -(-len(mints) // p.CHUNK_SIZE)  # ceil division
+        self.assertEqual(mock_get.call_count, expected_chunks)
+
+    @patch("research.discover_candidates._get_json")
+    def test_mint_absent_from_response_is_simply_missing(self, mock_get):
+        mock_get.return_value = [{"id": "MintA", "symbol": "AAA", "usdPrice": 1.5}]
+        prices = p.current_prices(["MintA", "MintB"])
+        self.assertEqual(prices, {"MintA": 1.5})
+        self.assertNotIn("MintB", prices)
+
+    @patch("research.discover_candidates._get_json")
+    def test_duplicate_mints_deduped_before_querying(self, mock_get):
+        mock_get.return_value = [{"id": "MintA", "symbol": "AAA", "usdPrice": 1.5}]
+        p.current_prices(["MintA", "MintA", "MintA"])
+        called_url = mock_get.call_args[0][0]
+        self.assertEqual(called_url.count("MintA"), 1)
+
+    @patch("research.discover_candidates._get_json")
+    def test_single_mint_wrapper_still_works(self, mock_get):
+        mock_get.return_value = [{"id": "MintA", "symbol": "AAA", "usdPrice": 1.5}]
+        self.assertEqual(p.current_price("MintA"), 1.5)
 
 
 if __name__ == "__main__":

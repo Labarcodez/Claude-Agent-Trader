@@ -32,6 +32,13 @@ from pathlib import Path
 REPO_ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(REPO_ROOT))
 
+# See research/discover_candidates.py for why: discovered symbols can contain
+# Unicode a narrow Windows console codepage can't print, which otherwise crashes
+# a run on a print() after all the real fetch/backtest work is already done.
+for _stream in (sys.stdout, sys.stderr):
+    if hasattr(_stream, "reconfigure"):
+        _stream.reconfigure(encoding="utf-8", errors="replace")
+
 from research import discover_candidates as disco  # noqa: E402
 from backtest import fetch_history as fh  # noqa: E402
 from backtest.engine import run_walk_forward, assess_overfit  # noqa: E402
@@ -122,7 +129,7 @@ def main():
     ap.add_argument("--min-holder-count", type=int, default=500)
     ap.add_argument("--min-organic-score", type=float, default=40)
     ap.add_argument("--min-pool-age-hours", type=float, default=72)
-    ap.add_argument("--max-top-holder-pct", type=float, default=20.0)
+    ap.add_argument("--max-top-holder-pct", type=float, default=22.0)
     ap.add_argument("--blue-chip-mcap-usd", type=float, default=50_000_000)
     ap.add_argument("--blue-chip-holder-count", type=int, default=10_000)
     ap.add_argument("--established-mcap-usd", type=float, default=5_000_000)

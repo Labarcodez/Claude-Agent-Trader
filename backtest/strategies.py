@@ -151,25 +151,20 @@ def regime(closes: list[float], i: int, fast: int = 10, slow: int = 30, vol_wind
     return "trending" if trend_strength > 1.5 else "ranging"
 
 
-def adaptive_ensemble(closes: list[float], i: int, state: dict) -> str:
-    """Regime-aware weighted vote across the three base strategies, instead of
+def _adaptive_ensemble_core(closes: list[float], i: int, state: dict, fast: int = 10, slow: int = 30,
+                             rsi_window: int = 14, vol_lookback: int = 20) -> str:
+    """Shared logic behind adaptive_ensemble and adaptive_ensemble_fast: a
+    regime-aware weighted vote across the three base strategies, instead of
     picking one strategy and hoping the market cooperates. In a trending
     regime, trend-following signals (SMA crossover, volatility breakout) get
     most of the weight; in a ranging regime, mean-reversion (RSI) dominates.
     A signal only fires if the weighted vote clears +/-0.5 -- disagreement
-    between sub-strategies resolves to "hold" rather than guessing.
-
-    This is the strategy config/risk.yaml and the trade-cycle skill expect to
-    be the default live strategy once it backtests acceptably (see
-    docs/STRATEGY.md "Judging a backtest" and the --walk-forward flag on
-    backtest/run_backtest.py) -- but it is not a guarantee, and it should be
-    re-validated the same as any other strategy before being trusted, and
-    periodically after."""
-    r = regime(closes, i)
+    between sub-strategies resolves to "hold" rather than guessing."""
+    r = regime(closes, i, fast=fast, slow=slow)
     sub_signals = {
-        "sma_crossover": sma_crossover(closes, i, state),
-        "rsi_mean_reversion": rsi_mean_reversion(closes, i, state),
-        "volatility_breakout": volatility_breakout(closes, i, state),
+        "sma_crossover": sma_crossover(closes, i, state, fast=fast, slow=slow),
+        "rsi_mean_reversion": rsi_mean_reversion(closes, i, state, window=rsi_window),
+        "volatility_breakout": volatility_breakout(closes, i, state, lookback=vol_lookback),
     }
     weights = (
         {"sma_crossover": 0.55, "volatility_breakout": 0.45, "rsi_mean_reversion": 0.0}
@@ -187,10 +182,40 @@ def adaptive_ensemble(closes: list[float], i: int, state: dict) -> str:
     return "hold"
 
 
+def adaptive_ensemble(closes: list[float], i: int, state: dict) -> str:
+    """Regime-aware weighted vote across the three base strategies, using the
+    original 10/30-bar SMA, 14-bar RSI, 20-bar breakout windows.
+
+    This is the strategy config/risk.yaml and the trade-cycle skill expect to
+    be the default live strategy once it backtests acceptably (see
+    docs/STRATEGY.md "Judging a backtest" and the --walk-forward flag on
+    backtest/run_backtest.py) -- but it is not a guarantee, and it should be
+    re-validated the same as any other strategy before being trusted, and
+    periodically after."""
+    return _adaptive_ensemble_core(closes, i, state, fast=10, slow=30, rsi_window=14, vol_lookback=20)
+
+
+def adaptive_ensemble_fast(closes: list[float], i: int, state: dict) -> str:
+    """Same regime-aware ensemble as adaptive_ensemble, but with roughly half
+    the lookback (5/15-bar SMA, 7-bar RSI, 10-bar breakout).
+
+    The hypothesis this tests: adaptive_ensemble's default windows were sized
+    for slower-moving assets like SOL/BTC, and may react too slowly for the
+    short-lived, high-volatility price action typical of emerging-tier /
+    memecoin candidates, where a real trend or reversal can complete in days,
+    not weeks. This is a hypothesis to backtest, not an assumed improvement --
+    a shorter window also means more false signals in genuine chop, so it is
+    a real trade-off. Only trust whichever of the two variants the walk-forward
+    comparison actually favors on a given asset class; do not prefer this one
+    by default just because it reacts faster."""
+    return _adaptive_ensemble_core(closes, i, state, fast=5, slow=15, rsi_window=7, vol_lookback=10)
+
+
 STRATEGIES = {
     "sma_crossover": sma_crossover,
     "rsi_mean_reversion": rsi_mean_reversion,
     "rsi_mean_reversion_trend_filtered": rsi_mean_reversion_trend_filtered,
     "volatility_breakout": volatility_breakout,
     "adaptive_ensemble": adaptive_ensemble,
+    "adaptive_ensemble_fast": adaptive_ensemble_fast,
 }

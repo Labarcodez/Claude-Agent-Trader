@@ -188,8 +188,37 @@ blue-chip."
   clears the bar in "Judging a backtest" below -- not because it's
   guaranteed better, but because picking one fixed strategy means betting
   the whole account on the market staying in the regime that strategy likes.
+- **`adaptive_ensemble_fast`** -- same ensemble logic as `adaptive_ensemble`
+  but with roughly half the lookback windows (5/15-bar SMA, 7-bar RSI,
+  10-bar breakout), on the hypothesis that the original's windows -- sized
+  for slower assets like SOL/BTC -- react too slowly for short-lived,
+  high-volatility emerging-tier/memecoin price action. **Tested and
+  rejected as the default (2026-08-20)**: walk-forward on BTC/SOL/MET
+  (180d) showed it underperforming `adaptive_ensemble` on every asset that
+  had a comparison point -- e.g. MET out-of-sample +8.94%/-18.21% drawdown
+  vs. the original's +35.67%/-8.82%, SOL +7.99%/50% win rate vs.
+  +11.33%/100%. Its in-sample legs were also poor across the board
+  (-14% to -36%) while out-of-sample looked fine -- a large *reversed*
+  train/test gap, which is itself a warning sign of an unstable,
+  noise-driven signal rather than a real edge that's merely faster.
+  **A same-day `backtest_all.py` re-run made the case worse, not better**:
+  on `Jotchua` -- an emerging-tier token whose only real move was a single
+  massive pump -- `adaptive_ensemble_fast` returned **+343.78% with a
+  -49.08% drawdown** on one trade, while the original `adaptive_ensemble`
+  took *zero* trades on the same token (correctly declining to chase it;
+  see the risk-tiers "worked example" above for the same pump also fooling
+  plain `rsi_mean_reversion` into a smaller but still dangerous +146%/-67%).
+  The shorter windows don't just react faster to real trends -- they react
+  faster to one-off pumps too, converting the exact trap the original
+  ensemble was built to avoid into an inflated backtest number. Kept in
+  `backtest/strategies.py`/`STRATEGIES` as a validated-negative baseline for
+  future comparisons, not as a live candidate -- don't re-derive this
+  experiment from scratch; if revisiting the "faster reaction for
+  short-lived tokens" idea, start from why this particular parameterization
+  failed (chasing pumps, not genuinely faster trend detection) rather than
+  assuming shorter windows are inherently better.
 
-None of the three base strategies is inherently "the" strategy -- they suit
+None of the base strategies is inherently "the" strategy -- they suit
 different market regimes, which is exactly the problem `adaptive_ensemble`
 and `trade-cycle` step 5's conservative-combination rule are trying to
 manage rather than ignore.

@@ -57,7 +57,12 @@ safety:
   min_holder_count: 500
   min_organic_score: 40          # Jupiter's own organicScore (0-100ish); below this, volume looks bot/wash-traded rather than real demand
   min_pool_age_hours: 72         # reject anything with a pool younger than 3 days -- the highest-risk rug window
-  max_top_holder_pct: 20.0       # single largest non-team holder's share of supply, from Jupiter's audit.topHoldersPercentage
+  max_top_holder_pct: 22.0       # single largest non-team holder's share of supply, from Jupiter's audit.topHoldersPercentage
+                                  # raised from 20.0 on 2026-08-20: MET (liq $2.7M, 36.5k holders, organic score 92.2,
+                                  # mint/freeze renounced, no RugCheck flags, adaptive_ensemble backtest +35.67% OOS /
+                                  # -8.82% DD / ok overfit) was rejected on this alone at 21.6% -- a 1.6pt miss with
+                                  # every other signal clean. Narrow, evidence-specific change, not a general loosening;
+                                  # re-tighten if a token admitted only by this widened band turns out to be a real rug.
   require_mint_authority_disabled: true    # Jupiter's audit.mintAuthorityDisabled must be true
   require_freeze_authority_disabled: true  # Jupiter's audit.freezeAuthorityDisabled must be true
   require_rugcheck_not_rugged: true        # cross-check via RugCheck.xyz -- the one thing Jupiter's own data doesn't cover

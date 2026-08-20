@@ -17,6 +17,14 @@ journal/trades.jsonl
 state/paper_portfolio.json
 journal/paper_trades.jsonl
 
+# Regime filter cache (paper_trading/run_paper_cycle.py) -- short-lived
+# (REGIME_CACHE_TTL_SECONDS), regenerates automatically, not source.
+state/regime_cache.json
+
+# Per-candidate price-history cache (paper_trading/run_paper_cycle.py) --
+# same reasoning, short-lived (PRICE_HISTORY_CACHE_TTL_SECONDS).
+state/price_history_cache/
+
 # Live starting-capital baseline -- created by trade-cycle's first real
 # cycle from the wallet's actual funded balance (see config/risk.yaml
 # "Capital" and trade-cycle SKILL.md step 2). There's no fixed/shipped
