@@ -208,6 +208,52 @@ class TestTierClassification(unittest.TestCase):
         self.assertEqual(result["data"]["fdv_usd"], 200_000_000)
 
 
+class TestGatherCandidatesSources(unittest.TestCase):
+    """gather_candidates() combines 5 sources -- verified live that
+    jupiter_verified_tag alone returns 2,561 tokens vs. ~65 from the
+    momentum-based sources (organic/trending/traded/recent) combined, which
+    are all snapshots of "what's hot right now" and can never surface an
+    established-but-not-currently-trending token no matter how many cycles
+    run. This is the actual ecosystem-breadth fix."""
+
+    def _args(self, **overrides):
+        defaults = dict(no_organic=True, no_trending=True, no_traded=True, no_recent=True, no_verified=True,
+                         limit_per_source=10)
+        defaults.update(overrides)
+        return argparse.Namespace(**defaults)
+
+    @patch("research.discover_candidates.fetch_jupiter_tag")
+    def test_verified_tag_source_included_when_enabled(self, mock_tag):
+        mock_tag.return_value = [{"id": "MintV1", "symbol": "V1"}]
+        result = disco.gather_candidates(self._args(no_verified=False))
+        mock_tag.assert_called_once_with("verified")
+        self.assertIn("MintV1", result)
+
+    @patch("research.discover_candidates.fetch_jupiter_tag")
+    def test_verified_tag_source_skipped_when_disabled(self, mock_tag):
+        disco.gather_candidates(self._args(no_verified=True))
+        mock_tag.assert_not_called()
+
+    @patch("research.discover_candidates.fetch_jupiter_category")
+    def test_toptraded_source_included_when_enabled(self, mock_category):
+        mock_category.return_value = [{"id": "MintT1", "symbol": "T1"}]
+        result = disco.gather_candidates(self._args(no_traded=False))
+        called_categories = {call.args[0] for call in mock_category.call_args_list}
+        self.assertIn("toptraded", called_categories)
+        self.assertIn("MintT1", result)
+
+    @patch("research.discover_candidates.fetch_jupiter_tag")
+    @patch("research.discover_candidates.fetch_jupiter_category")
+    @patch("research.discover_candidates.fetch_jupiter_recent")
+    def test_dedupes_a_mint_appearing_in_multiple_sources(self, mock_recent, mock_category, mock_tag):
+        shared = {"id": "MintShared", "symbol": "SHARED"}
+        mock_category.return_value = [shared]
+        mock_recent.return_value = [shared]
+        mock_tag.return_value = [shared]
+        result = disco.gather_candidates(self._args(no_organic=False, no_recent=False, no_verified=False))
+        self.assertEqual(list(result.keys()).count("MintShared"), 1)
+
+
 class TestGetJsonRetry(unittest.TestCase):
     """_get_json() retries transient server errors (429/502/503/504) instead
     of giving up after one attempt -- observed live: RugCheck.xyz returned

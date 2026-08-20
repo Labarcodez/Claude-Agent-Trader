@@ -103,6 +103,18 @@ def fetch_jupiter_recent(limit: int) -> list[dict]:
     return _get_json(f"{JUPITER_BASE}/recent?limit={limit}") or []
 
 
+def fetch_jupiter_tag(tag: str) -> list[dict]:
+    """Verified live: query=verified alone returns 2,561 tokens -- Jupiter's
+    full verified-token list, not a momentum snapshot like the toporganicscore/
+    toptrending/recent sources above. Those three only ever surface whatever
+    happens to be trending/organic/newest *right now*, so a legitimate,
+    established-but-not-currently-hot token could never be discovered at all
+    regardless of how many cycles run. This is the actual breadth fix -- the
+    max_candidates rotation (see paper_trading/run_paper_cycle.py) is what
+    makes evaluating a pool this size safe without hammering RugCheck."""
+    return _get_json(f"{JUPITER_BASE}/tag?query={tag}") or []
+
+
 def fetch_rugcheck_report(mint: str) -> dict | None:
     return _get_json(f"{RUGCHECK_BASE}/tokens/{mint}/report")
 
@@ -129,8 +141,17 @@ def gather_candidates(args) -> dict[str, dict]:
             for tok in fetch_jupiter_category("toptrending", interval, args.limit_per_source):
                 candidates.setdefault(tok["id"], tok)
 
+    if not args.no_traded:
+        for interval in ("6h", "24h"):
+            for tok in fetch_jupiter_category("toptraded", interval, args.limit_per_source):
+                candidates.setdefault(tok["id"], tok)
+
     if not args.no_recent:
         for tok in fetch_jupiter_recent(args.limit_per_source):
+            candidates.setdefault(tok["id"], tok)
+
+    if not args.no_verified:
+        for tok in fetch_jupiter_tag("verified"):
             candidates.setdefault(tok["id"], tok)
 
     for mint in CORE_ASSET_MINTS:
@@ -267,7 +288,13 @@ def main():
     ap.add_argument("--request-delay", type=float, default=0.4, help="Seconds between RugCheck/DexScreener calls")
     ap.add_argument("--no-organic", action="store_true", help="Skip the toporganicscore source")
     ap.add_argument("--no-trending", action="store_true", help="Skip the toptrending source")
+    ap.add_argument("--no-traded", action="store_true", help="Skip the toptraded (by volume) source")
     ap.add_argument("--no-recent", action="store_true", help="Skip the recent-pools source")
+    ap.add_argument("--no-verified", action="store_true",
+                     help="Skip Jupiter's full verified-token list (2500+ tokens as of writing) -- the actual "
+                          "ecosystem-breadth source; the other sources are all momentum snapshots (whatever's "
+                          "trending/organic/newest right now) that can never surface an established-but-not-"
+                          "currently-hot token no matter how many cycles run")
     ap.add_argument("--always-rugcheck", action="store_true",
                      help="Call RugCheck even for candidates that already fail Jupiter's checks (uses more requests)")
     ap.add_argument("--cross-check-dexscreener", dest="cross_check_dexscreener", action="store_true", default=True)

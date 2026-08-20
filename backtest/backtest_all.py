@@ -73,7 +73,8 @@ def disco_args(args: argparse.Namespace) -> argparse.Namespace:
 
 def discover_eligible(args) -> list[dict]:
     candidates = disco.gather_candidates(argparse.Namespace(
-        no_organic=False, no_trending=False, no_recent=False, limit_per_source=args.limit_per_source,
+        no_organic=False, no_trending=False, no_traded=False, no_recent=False, no_verified=False,
+        limit_per_source=args.limit_per_source,
     ))
     mints = list(candidates.keys())[: args.max_candidates]
     eligible = []

@@ -378,7 +378,8 @@ def run_cycle(args):
     # ---- discovery ----
     print("\nRunning discovery...")
     candidates = disco.gather_candidates(argparse.Namespace(
-        no_organic=False, no_trending=False, no_recent=False, limit_per_source=args.limit_per_source,
+        no_organic=False, no_trending=False, no_traded=False, no_recent=False, no_verified=False,
+        limit_per_source=args.limit_per_source,
     ))
     recently_evaluated = _load_recently_evaluated()
     mints = select_candidates_for_rotation(list(candidates.keys()), args.max_candidates, recently_evaluated,
