@@ -18,9 +18,13 @@ Simplifications vs. the live trade-cycle skill (documented, not hidden):
   - No real swap quote, so no live slippage/price-impact check -- a fixed
     fee_bps + slippage_bps cost is assumed instead (same convention as
     backtest/engine.py).
-  - No max_daily_trade_count / max_daily_volume_usd / min_hours_between_trades
-    cadence caps -- this script is typically run manually or via /loop at a
-    deliberate interval, so cadence is controlled by how often you run it.
+  - No max_daily_trade_count / max_daily_volume_usd / multi-cycle
+    min_hours_between_trades cadence caps -- this script is typically run
+    manually or via /loop at a deliberate interval, so cadence is controlled
+    by how often you run it. The one exception: a mint sold this cycle can't
+    be bought back in the SAME cycle (a real observed gap -- a take-profit
+    exit and an immediate same-price re-entry would otherwise cancel out the
+    exit's purpose, which cycle-interval spacing alone doesn't prevent).
   - Core position sizing, tiering, volatility scaling, portfolio heat,
     regime filter, and stop-loss/take-profit/trailing-stop ARE all real,
     reusing the exact same code (backtest/strategies.py, research/discover_candidates.py)
@@ -452,6 +456,7 @@ def run_cycle(args):
           f"{'risk-ON (new entries allowed)' if allow_new_entries else 'risk-OFF (new entries blocked)'}")
 
     actions = []
+    sold_this_cycle: set[str] = set()
 
     # ---- manage existing positions first (exits are never regime-gated) ----
     for mint, pos in list(state["positions"].items()):
@@ -482,6 +487,7 @@ def run_cycle(args):
             })
             actions.append({"type": "sell", "symbol": pos["symbol"], "mint": mint, "reason": exit_reason, "return_pct": ret * 100})
             del state["positions"][mint]
+            sold_this_cycle.add(mint)
 
     # ---- consider new entries ----
     # not_traded records why each eligible candidate that WASN'T bought this
@@ -500,6 +506,16 @@ def run_cycle(args):
         for mint, result in eligible.items():
             if mint in state["positions"]:
                 continue  # already held -- not a "skip", just not a new entry decision
+            if mint in sold_this_cycle:
+                # Mirrors config/risk.yaml's min_hours_between_trades_same_token
+                # (4h), which the live trade-cycle skill enforces -- without
+                # this, a take-profit/stop-loss exit and a same-cycle re-entry
+                # at essentially the same price (nothing moved between the
+                # sell and this check) would silently cancel out the exit's
+                # purpose. Real trade: CATE hit take-profit and was bought
+                # right back in the same cycle before this guard existed.
+                not_traded[mint] = "sold this same cycle -- not re-entering immediately (mirrors live's min_hours_between_trades_same_token)"
+                continue
             if open_slots <= 0:
                 not_traded[mint] = f"no open slots (max_concurrent_positions={args.max_concurrent_positions})"
                 continue
