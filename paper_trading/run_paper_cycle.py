@@ -399,6 +399,14 @@ def run_cycle(args):
     for mint in disco.CORE_ASSET_MINTS:
         tracked_mints.discard(mint)
 
+    # Observed live: the pricing call below hit a 429 on nearly every single
+    # cycle, always recovered by the retry, but at a consistent ~12s backoff
+    # tax each time. gather_candidates() just made 5 back-to-back Jupiter
+    # calls (2 organic + 2 trending + 1 recent intervals) with no spacing --
+    # a brief pause here gives Jupiter's rate-limit window a chance to
+    # settle before asking it for prices, instead of relying on the retry to
+    # clean up every cycle.
+    time.sleep(2.0)
     prices = current_prices(list(tracked_mints | disco.CORE_ASSET_MINTS))
 
     # If the initial batched fetch missed any OPEN position specifically,
