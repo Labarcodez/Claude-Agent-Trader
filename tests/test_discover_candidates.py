@@ -222,30 +222,34 @@ class TestGatherCandidatesSources(unittest.TestCase):
         defaults.update(overrides)
         return argparse.Namespace(**defaults)
 
+    @patch("time.sleep", return_value=None)  # gather_candidates() paces its internal calls -- no need to wait in tests
     @patch("research.discover_candidates.fetch_jupiter_tag")
-    def test_verified_tag_source_included_when_enabled(self, mock_tag):
+    def test_verified_tag_source_included_when_enabled(self, mock_tag, mock_sleep):
         mock_tag.return_value = [{"id": "MintV1", "symbol": "V1"}]
         result = disco.gather_candidates(self._args(no_verified=False))
         mock_tag.assert_called_once_with("verified")
         self.assertIn("MintV1", result)
 
+    @patch("time.sleep", return_value=None)
     @patch("research.discover_candidates.fetch_jupiter_tag")
-    def test_verified_tag_source_skipped_when_disabled(self, mock_tag):
+    def test_verified_tag_source_skipped_when_disabled(self, mock_tag, mock_sleep):
         disco.gather_candidates(self._args(no_verified=True))
         mock_tag.assert_not_called()
 
+    @patch("time.sleep", return_value=None)
     @patch("research.discover_candidates.fetch_jupiter_category")
-    def test_toptraded_source_included_when_enabled(self, mock_category):
+    def test_toptraded_source_included_when_enabled(self, mock_category, mock_sleep):
         mock_category.return_value = [{"id": "MintT1", "symbol": "T1"}]
         result = disco.gather_candidates(self._args(no_traded=False))
         called_categories = {call.args[0] for call in mock_category.call_args_list}
         self.assertIn("toptraded", called_categories)
         self.assertIn("MintT1", result)
 
+    @patch("time.sleep", return_value=None)
     @patch("research.discover_candidates.fetch_jupiter_tag")
     @patch("research.discover_candidates.fetch_jupiter_category")
     @patch("research.discover_candidates.fetch_jupiter_recent")
-    def test_dedupes_a_mint_appearing_in_multiple_sources(self, mock_recent, mock_category, mock_tag):
+    def test_dedupes_a_mint_appearing_in_multiple_sources(self, mock_recent, mock_category, mock_tag, mock_sleep):
         shared = {"id": "MintShared", "symbol": "SHARED"}
         mock_category.return_value = [shared]
         mock_recent.return_value = [shared]

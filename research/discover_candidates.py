@@ -130,28 +130,43 @@ def fetch_dexscreener_best_solana_pair(mint: str) -> dict | None:
 def gather_candidates(args) -> dict[str, dict]:
     """Returns {mint: jupiter_token_data}, deduped across sources, core assets excluded."""
     candidates: dict[str, dict] = {}
+    # 8 back-to-back Jupiter calls (2 organic + 2 trending + 2 traded + 1
+    # recent + 1 verified) with no spacing was hitting 429s on 2 of them most
+    # cycles -- always recovered by _get_json()'s own retry, but at a real
+    # cost (two live cycles took ~100s+ each, mostly retry backoff, vs the
+    # usual ~12-15s). A brief pause between calls spreads the load instead of
+    # bursting it, the same fix that already worked for the pricing call in
+    # paper_trading/run_paper_cycle.py.
+    first_call = True
+
+    def _paced_call(fn, *fn_args):
+        nonlocal first_call
+        if not first_call:
+            time.sleep(0.5)
+        first_call = False
+        return fn(*fn_args)
 
     if not args.no_organic:
         for interval in ("6h", "24h"):
-            for tok in fetch_jupiter_category("toporganicscore", interval, args.limit_per_source):
+            for tok in _paced_call(fetch_jupiter_category, "toporganicscore", interval, args.limit_per_source):
                 candidates.setdefault(tok["id"], tok)
 
     if not args.no_trending:
         for interval in ("1h", "6h"):
-            for tok in fetch_jupiter_category("toptrending", interval, args.limit_per_source):
+            for tok in _paced_call(fetch_jupiter_category, "toptrending", interval, args.limit_per_source):
                 candidates.setdefault(tok["id"], tok)
 
     if not args.no_traded:
         for interval in ("6h", "24h"):
-            for tok in fetch_jupiter_category("toptraded", interval, args.limit_per_source):
+            for tok in _paced_call(fetch_jupiter_category, "toptraded", interval, args.limit_per_source):
                 candidates.setdefault(tok["id"], tok)
 
     if not args.no_recent:
-        for tok in fetch_jupiter_recent(args.limit_per_source):
+        for tok in _paced_call(fetch_jupiter_recent, args.limit_per_source):
             candidates.setdefault(tok["id"], tok)
 
     if not args.no_verified:
-        for tok in fetch_jupiter_tag("verified"):
+        for tok in _paced_call(fetch_jupiter_tag, "verified"):
             candidates.setdefault(tok["id"], tok)
 
     for mint in CORE_ASSET_MINTS:

@@ -71,6 +71,12 @@ DISCOVERY_ROTATION_PATH = REPO_ROOT / "state" / "discovery_rotation.json"
 DISCOVERY_ROTATION_HISTORY_CYCLES = 3  # remember roughly this many cycles' worth of evaluated mints -- a
                                          # bounded, FIFO "recently seen" window, not permanent exclusion, so a
                                          # token drops back into rotation once enough cycles have passed
+MAX_FRESH_PRICE_HISTORY_FETCHES_PER_CYCLE = 8  # discovery now rotates through a ~2,600-token pool, so most
+                                                 # eligible candidates each cycle are price_history_cache misses
+                                                 # (never seen before) -- observed live: 6-8 fresh CoinGecko
+                                                 # fetches in one cycle took 1m40s-1m50s from repeated 429
+                                                 # backoff (vs ~13s typical). Capping bounds cycle duration;
+                                                 # deferred candidates are simply reconsidered next cycle.
 
 TIER_MULTIPLIERS = {"blue_chip": 1.0, "established": 0.7, "emerging": 0.4}
 
@@ -503,6 +509,15 @@ def run_cycle(args):
     if allow_new_entries:
         open_slots = args.max_concurrent_positions - len(state["positions"])
         emerging_open = sum(1 for p in state["positions"].values() if p.get("tier") == "emerging")
+        # Discovery now rotates through a ~2,600-token pool (see
+        # select_candidates_for_rotation()), so most eligible candidates each
+        # cycle are ones never seen before -- a price_history_cache miss,
+        # meaning a fresh CoinGecko fetch. Observed live: cycles with 6-8
+        # such candidates took 1m40s-1m50s (vs. ~13s typical) from repeated
+        # 429 backoff. Capping fresh fetches per cycle bounds cycle duration;
+        # candidates deferred this way get reconsidered next cycle (discovery
+        # re-evaluates them fresh each time, nothing is lost, just delayed).
+        fresh_fetches_this_cycle = 0
         for mint, result in eligible.items():
             if mint in state["positions"]:
                 continue  # already held -- not a "skip", just not a new entry decision
@@ -527,6 +542,14 @@ def run_cycle(args):
             if tier == "emerging" and emerging_open >= args.max_emerging_tier_positions:
                 not_traded[mint] = f"emerging-tier cap reached (max_emerging_tier_positions={args.max_emerging_tier_positions})"
                 continue
+            is_cached = _load_price_history_cache(mint, args.history_days) is not None
+            if not is_cached and fresh_fetches_this_cycle >= MAX_FRESH_PRICE_HISTORY_FETCHES_PER_CYCLE:
+                not_traded[mint] = (f"deferred to a future cycle (hit MAX_FRESH_PRICE_HISTORY_FETCHES_PER_CYCLE="
+                                     f"{MAX_FRESH_PRICE_HISTORY_FETCHES_PER_CYCLE} -- bounds cycle duration when "
+                                     f"discovery surfaces many never-before-seen candidates at once)")
+                continue
+            if not is_cached:
+                fresh_fetches_this_cycle += 1
             closes = get_price_history_closes(mint, args.history_days)
             time.sleep(args.request_delay)
             signal = compute_signal(closes) if closes else None
