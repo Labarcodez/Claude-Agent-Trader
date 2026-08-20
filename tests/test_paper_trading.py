@@ -49,6 +49,34 @@ class TestPortfolioValueUsd(unittest.TestCase):
         self.assertEqual(p.portfolio_value_usd(state, {}), 10.0)
 
 
+class TestAllPositionsPriced(unittest.TestCase):
+    """all_positions_priced() gates whether portfolio_value_usd()'s result is
+    trustworthy for circuit-breaker/peak-tracking decisions -- a real false
+    circuit-breaker trip happened when a single failed batched pricing
+    request silently zeroed out every open position's price at once,
+    collapsing portfolio_value_usd() to cash-only and looking exactly like a
+    33% drawdown that never actually happened (true value moments later,
+    independently verified, was down only 1.4% from peak)."""
+
+    def test_true_with_no_open_positions(self):
+        state = {"positions": {}}
+        self.assertTrue(p.all_positions_priced(state, {}))
+
+    def test_true_when_every_position_has_a_price(self):
+        state = {"positions": {"MINT1": {}, "MINT2": {}}}
+        self.assertTrue(p.all_positions_priced(state, {"MINT1": 1.0, "MINT2": 2.0}))
+
+    def test_false_when_any_position_is_missing_a_price(self):
+        state = {"positions": {"MINT1": {}, "MINT2": {}}}
+        self.assertFalse(p.all_positions_priced(state, {"MINT1": 1.0}))
+
+    def test_false_when_all_positions_are_missing_prices(self):
+        # the exact real failure mode: one failed batch request wipes every
+        # open position's price at once, not just one of several
+        state = {"positions": {"MINT1": {}, "MINT2": {}}}
+        self.assertFalse(p.all_positions_priced(state, {}))
+
+
 class TestPortfolioHeatPct(unittest.TestCase):
     def test_zero_with_no_positions(self):
         state = {"cash_usd": 50.0, "positions": {}}

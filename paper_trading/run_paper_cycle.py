@@ -203,6 +203,23 @@ def portfolio_value_usd(state: dict, prices: dict[str, float]) -> float:
     return total
 
 
+def all_positions_priced(state: dict, prices: dict[str, float]) -> bool:
+    """False if any open position is missing a price this cycle.
+    portfolio_value_usd() silently EXCLUDES unpriced positions from its sum
+    -- fine for one stale/delisted token, but if pricing fails for every open
+    position at once (e.g. a single batched request in current_prices() gets
+    rate-limited and fails as a unit), portfolio_value_usd() quietly
+    collapses toward cash-only. That looks exactly like a real crash to
+    circuit-breaker/peak-tracking logic even though nothing actually moved --
+    a real trip on this exact pattern computed $33.91 (cash only) against a
+    $50.73 peak, while a fresh independent price check moments later showed
+    the true value was $49.99. Callers must gate any circuit-breaker or
+    peak-update decision on this returning True; when it's False, the
+    portfolio_value_usd() for this cycle is not trustworthy for judgment
+    calls, only for its already-correctly-scoped per-position uses."""
+    return all(mint in prices for mint in state["positions"])
+
+
 # ---- Regime filter ------------------------------------------------------------
 
 def _load_regime_cache(reference_coin: str, sma_window_days: int) -> bool | None:
@@ -385,18 +402,25 @@ def run_cycle(args):
     prices = current_prices(list(tracked_mints | disco.CORE_ASSET_MINTS))
 
     port_value = portfolio_value_usd(state, prices)
-    if port_value > state["peak_portfolio_value_usd"]:
-        state["peak_portfolio_value_usd"] = port_value
 
-    # ---- circuit breaker check ----
-    dd_from_peak = (port_value - state["peak_portfolio_value_usd"]) / state["peak_portfolio_value_usd"] if state["peak_portfolio_value_usd"] else 0
-    if port_value <= args.circuit_breaker_floor_usd or dd_from_peak <= -args.circuit_breaker_daily_loss_pct:
-        reason = f"portfolio ${port_value:.2f} hit floor/drawdown limit (peak was ${state['peak_portfolio_value_usd']:.2f})"
-        state["circuit_breaker"] = {"tripped": True, "reason": reason, "tripped_at": cycle_start.isoformat()}
-        save_state(state)
-        append_journal({"timestamp": cycle_start.isoformat(), "type": "circuit_breaker_trip", "reason": reason, "portfolio_value_usd": port_value})
-        print(f"\n!!! PAPER CIRCUIT BREAKER TRIPPED: {reason}")
-        return
+    if not all_positions_priced(state, prices):
+        unpriced = [mint for mint in state["positions"] if mint not in prices]
+        print(f"  ! {len(unpriced)}/{len(state['positions'])} open position(s) couldn't be priced this "
+              f"cycle -- skipping circuit breaker check and peak update (would be computed on an artificially "
+              f"low portfolio value otherwise)", file=sys.stderr)
+    else:
+        if port_value > state["peak_portfolio_value_usd"]:
+            state["peak_portfolio_value_usd"] = port_value
+
+        # ---- circuit breaker check ----
+        dd_from_peak = (port_value - state["peak_portfolio_value_usd"]) / state["peak_portfolio_value_usd"] if state["peak_portfolio_value_usd"] else 0
+        if port_value <= args.circuit_breaker_floor_usd or dd_from_peak <= -args.circuit_breaker_daily_loss_pct:
+            reason = f"portfolio ${port_value:.2f} hit floor/drawdown limit (peak was ${state['peak_portfolio_value_usd']:.2f})"
+            state["circuit_breaker"] = {"tripped": True, "reason": reason, "tripped_at": cycle_start.isoformat()}
+            save_state(state)
+            append_journal({"timestamp": cycle_start.isoformat(), "type": "circuit_breaker_trip", "reason": reason, "portfolio_value_usd": port_value})
+            print(f"\n!!! PAPER CIRCUIT BREAKER TRIPPED: {reason}")
+            return
 
     # ---- regime filter ----
     allow_new_entries = regime_allows_new_entries(args.regime_reference_coin, args.regime_sma_window_days)
