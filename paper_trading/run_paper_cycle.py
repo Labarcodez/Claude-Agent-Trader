@@ -401,14 +401,28 @@ def run_cycle(args):
 
     prices = current_prices(list(tracked_mints | disco.CORE_ASSET_MINTS))
 
+    # If the initial batched fetch missed any OPEN position specifically,
+    # retry just those before anything downstream (circuit breaker, and
+    # crucially the exit-management stop-loss/take-profit/trailing-stop
+    # checks below) runs against incomplete data. This closed a real gap:
+    # previously only the end-of-cycle report/journal got a fallback
+    # re-fetch, so a cycle whose initial pricing failed would silently skip
+    # the stop-loss check entirely for that cycle even though a price WAS
+    # obtainable (proven by that same later fallback succeeding) -- exactly
+    # the kind of gap that matters most when a position is actually
+    # approaching its stop-loss, not a hypothetical edge case.
+    unpriced_positions = [mint for mint in state["positions"] if mint not in prices]
+    if unpriced_positions:
+        prices.update(current_prices(unpriced_positions))
+
     port_value = portfolio_value_usd(state, prices)
     port_value_reliable = all_positions_priced(state, prices)
 
     if not port_value_reliable:
         unpriced = [mint for mint in state["positions"] if mint not in prices]
-        print(f"  ! {len(unpriced)}/{len(state['positions'])} open position(s) couldn't be priced this "
-              f"cycle -- skipping circuit breaker check and peak update (would be computed on an artificially "
-              f"low portfolio value otherwise)", file=sys.stderr)
+        print(f"  ! {len(unpriced)}/{len(state['positions'])} open position(s) still couldn't be priced this "
+              f"cycle after a retry -- skipping circuit breaker check, peak update, AND this cycle's stop-loss/"
+              f"take-profit check for the affected position(s) (no reliable price to check them against)", file=sys.stderr)
     else:
         if port_value > state["peak_portfolio_value_usd"]:
             state["peak_portfolio_value_usd"] = port_value
