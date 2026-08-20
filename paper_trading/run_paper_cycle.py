@@ -371,30 +371,49 @@ def run_cycle(args):
             del state["positions"][mint]
 
     # ---- consider new entries ----
+    # not_traded records why each eligible candidate that WASN'T bought this
+    # cycle was skipped -- without this, the journal only ever shows the
+    # trades that happened, not the reasoning behind the (usually much more
+    # common) decision not to trade one. That's a real audit gap: "why didn't
+    # we buy X this cycle" was previously unanswerable after the fact without
+    # re-deriving it from scratch.
+    not_traded: dict[str, str] = {}
+    if not allow_new_entries:
+        not_traded = {mint: "regime filter blocking new entries (risk-OFF)"
+                      for mint in eligible if mint not in state["positions"]}
     if allow_new_entries:
         open_slots = args.max_concurrent_positions - len(state["positions"])
         emerging_open = sum(1 for p in state["positions"].values() if p.get("tier") == "emerging")
         for mint, result in eligible.items():
-            if open_slots <= 0:
-                break
             if mint in state["positions"]:
+                continue  # already held -- not a "skip", just not a new entry decision
+            if open_slots <= 0:
+                not_traded[mint] = f"no open slots (max_concurrent_positions={args.max_concurrent_positions})"
                 continue
             price = prices.get(mint)
             if price is None:
+                not_traded[mint] = "no live price available"
                 continue
             tier = result["tier"]
             if tier == "emerging" and emerging_open >= args.max_emerging_tier_positions:
+                not_traded[mint] = f"emerging-tier cap reached (max_emerging_tier_positions={args.max_emerging_tier_positions})"
                 continue
             closes = get_price_history_closes(mint, args.history_days)
             time.sleep(args.request_delay)
             signal = compute_signal(closes) if closes else None
             if signal != "buy" and closes is not None:
+                not_traded[mint] = f"strategy signal was '{signal}', not buy"
                 continue  # only trade no-history tokens opportunistically-small; require an actual buy signal when history exists
             size_usd = size_position(tier, port_value, closes, args)
-            if size_usd < args.min_trade_usd or size_usd > state["cash_usd"]:
+            if size_usd < args.min_trade_usd:
+                not_traded[mint] = f"sized position ${size_usd:.2f} below min_trade_usd (${args.min_trade_usd:.2f})"
+                continue
+            if size_usd > state["cash_usd"]:
+                not_traded[mint] = f"sized position ${size_usd:.2f} exceeds available cash (${state['cash_usd']:.2f})"
                 continue
             projected_heat = portfolio_heat_pct(state, prices, args.stop_loss_pct) + (size_usd * args.stop_loss_pct / port_value if port_value else 0)
             if projected_heat > args.max_portfolio_heat_pct:
+                not_traded[mint] = f"would exceed max_portfolio_heat_pct ({projected_heat:.1%} > {args.max_portfolio_heat_pct:.1%})"
                 continue
             fill_price = price * (1 + args.slippage_bps / 10_000)
             quantity = (size_usd * (1 - args.fee_bps / 10_000)) / fill_price
@@ -428,6 +447,7 @@ def run_cycle(args):
         "regime_allows_new_entries": allow_new_entries,
         "discovery": {"found": len(candidates), "evaluated": len(mints), "eligible": len(eligible), "rejected": rejected_count},
         "actions": actions,
+        "not_traded": {mint: {"symbol": eligible[mint]["symbol"], "reason": reason} for mint, reason in not_traded.items()},
         "open_positions": len(state["positions"]),
     })
 
@@ -437,6 +457,10 @@ def run_cycle(args):
             print(f"  BUY  {a['symbol']:>10}  ${a['size_usd']:.2f}  tier={a['tier']:<10}  ({a['signal_basis']})")
         else:
             print(f"  SELL {a['symbol']:>10}  {a['reason']}  return={a['return_pct']:+.1f}%")
+    if not_traded:
+        print(f"\nEligible but not traded ({len(not_traded)}):")
+        for mint, reason in not_traded.items():
+            print(f"  {eligible[mint]['symbol']:>10}  {reason}")
     print(f"\nPortfolio value: ${port_value:.2f} -> ${final_value:.2f}  "
           f"(total return since start: {(final_value / state['starting_capital_usd'] - 1) * 100:+.1f}%)")
     print(f"Open positions: {len(state['positions'])}  |  Closed trades all-time: {len(state['closed_trades'])}")
