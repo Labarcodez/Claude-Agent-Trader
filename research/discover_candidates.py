@@ -61,6 +61,17 @@ CORE_ASSET_MINTS = {
 }
 
 
+# 429 (rate limited) and 502/503/504 (bad gateway/unavailable/gateway
+# timeout) are all transient, worth retrying -- unlike a definitive client
+# error (400/401/403/404), which retrying can't fix. Observed live:
+# RugCheck.xyz returned 502 for two otherwise-clean candidates in the same
+# cycle; without a retry here, evaluate_candidate()'s fail-safe design
+# correctly rejects them rather than trading unconfirmed -- but "reject a
+# legitimate candidate over one brief upstream hiccup" is a worse outcome
+# than "retry a couple times first" when the fix is this cheap.
+RETRYABLE_HTTP_CODES = {429, 502, 503, 504}
+
+
 def _get_json(url: str, retries: int = 3, backoff: float = 2.0):
     req = urllib.request.Request(url, headers={"User-Agent": USER_AGENT})
     last_err = None
@@ -69,7 +80,7 @@ def _get_json(url: str, retries: int = 3, backoff: float = 2.0):
             with urllib.request.urlopen(req, timeout=20) as resp:
                 return json.loads(resp.read().decode("utf-8"))
         except urllib.error.HTTPError as e:
-            if e.code == 429:
+            if e.code in RETRYABLE_HTTP_CODES:
                 time.sleep(backoff * (attempt + 1))
                 last_err = e
                 continue

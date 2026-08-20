@@ -3,10 +3,12 @@ mocked RugCheck responses, no real network calls (evaluate_candidate's stage-1
 checks run on plain dicts; fetch_rugcheck_report is patched for stage 2).
 Run: python3 -m unittest discover -s tests -v"""
 import argparse
+import io
 import sys
 import unittest
+import urllib.error
 from pathlib import Path
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 from research import discover_candidates as disco  # noqa: E402
@@ -204,6 +206,57 @@ class TestTierClassification(unittest.TestCase):
         self.assertEqual(result["tier"], "emerging")
         self.assertEqual(result["data"]["mcap_usd"], 0)
         self.assertEqual(result["data"]["fdv_usd"], 200_000_000)
+
+
+class TestGetJsonRetry(unittest.TestCase):
+    """_get_json() retries transient server errors (429/502/503/504) instead
+    of giving up after one attempt -- observed live: RugCheck.xyz returned
+    502 for two otherwise-clean candidates in the same cycle, and without a
+    retry, evaluate_candidate()'s fail-safe design correctly rejects them
+    rather than trading unconfirmed, but that's a worse outcome than a quick
+    retry when the upstream hiccup is genuinely brief."""
+
+    def _http_error(self, code):
+        return urllib.error.HTTPError(url="http://x", code=code, msg="err", hdrs=None, fp=io.BytesIO(b""))
+
+    @patch("time.sleep", return_value=None)
+    @patch("urllib.request.urlopen")
+    def test_retries_on_502_then_succeeds(self, mock_urlopen, mock_sleep):
+        success_resp = MagicMock()
+        success_resp.read.return_value = b'{"ok": true}'
+        success_resp.__enter__.return_value = success_resp
+        mock_urlopen.side_effect = [self._http_error(502), success_resp]
+        result = disco._get_json("http://x")
+        self.assertEqual(result, {"ok": True})
+        self.assertEqual(mock_urlopen.call_count, 2)
+
+    @patch("time.sleep", return_value=None)
+    @patch("urllib.request.urlopen")
+    def test_retries_on_503_and_504_too(self, mock_urlopen, mock_sleep):
+        for code in (503, 504):
+            with self.subTest(code=code):
+                success_resp = MagicMock()
+                success_resp.read.return_value = b'{"ok": true}'
+                success_resp.__enter__.return_value = success_resp
+                mock_urlopen.side_effect = [self._http_error(code), success_resp]
+                result = disco._get_json("http://x")
+                self.assertEqual(result, {"ok": True})
+
+    @patch("time.sleep", return_value=None)
+    @patch("urllib.request.urlopen")
+    def test_404_returns_none_immediately_without_retry(self, mock_urlopen, mock_sleep):
+        mock_urlopen.side_effect = self._http_error(404)
+        result = disco._get_json("http://x")
+        self.assertIsNone(result)
+        self.assertEqual(mock_urlopen.call_count, 1)
+
+    @patch("time.sleep", return_value=None)
+    @patch("urllib.request.urlopen")
+    def test_gives_up_after_exhausting_retries_on_persistent_502(self, mock_urlopen, mock_sleep):
+        mock_urlopen.side_effect = self._http_error(502)
+        result = disco._get_json("http://x", retries=3)
+        self.assertIsNone(result)
+        self.assertEqual(mock_urlopen.call_count, 3)
 
 
 class TestPoolAgeHelper(unittest.TestCase):
