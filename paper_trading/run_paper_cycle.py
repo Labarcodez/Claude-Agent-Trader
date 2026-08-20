@@ -402,8 +402,9 @@ def run_cycle(args):
     prices = current_prices(list(tracked_mints | disco.CORE_ASSET_MINTS))
 
     port_value = portfolio_value_usd(state, prices)
+    port_value_reliable = all_positions_priced(state, prices)
 
-    if not all_positions_priced(state, prices):
+    if not port_value_reliable:
         unpriced = [mint for mint in state["positions"] if mint not in prices]
         print(f"  ! {len(unpriced)}/{len(state['positions'])} open position(s) couldn't be priced this "
               f"cycle -- skipping circuit breaker check and peak update (would be computed on an artificially "
@@ -528,10 +529,19 @@ def run_cycle(args):
     state["cycles_run"] += 1
     save_state(state)
 
+    # If the initial pricing pass was incomplete, port_value understated the
+    # real portfolio (same root cause as the circuit-breaker guard above) --
+    # don't let that same misleading number leak into the reported/journaled
+    # "before" value now that final_prices likely recovered it via its own
+    # re-fetch. Report it as the best available estimate instead of a number
+    # that reads like a same-cycle crash-and-recover that never happened.
+    reported_before = final_value if not port_value_reliable else port_value
+
     append_journal({
         "timestamp": cycle_start.isoformat(),
         "type": "cycle",
-        "portfolio_value_usd_before": port_value,
+        "portfolio_value_usd_before": reported_before,
+        "portfolio_value_usd_before_pricing_incomplete": not port_value_reliable,
         "portfolio_value_usd_after": final_value,
         "regime_allows_new_entries": allow_new_entries,
         "discovery": {"found": len(candidates), "evaluated": len(mints), "eligible": len(eligible), "rejected": rejected_count},
@@ -550,7 +560,8 @@ def run_cycle(args):
         print(f"\nEligible but not traded ({len(not_traded)}):")
         for mint, reason in not_traded.items():
             print(f"  {eligible[mint]['symbol']:>10}  {reason}")
-    print(f"\nPortfolio value: ${port_value:.2f} -> ${final_value:.2f}  "
+    before_note = "  (pricing was incomplete at cycle start -- showing best available estimate, not a same-cycle move)" if not port_value_reliable else ""
+    print(f"\nPortfolio value: ${reported_before:.2f} -> ${final_value:.2f}{before_note}  "
           f"(total return since start: {(final_value / state['starting_capital_usd'] - 1) * 100:+.1f}%)")
     print(f"Open positions: {len(state['positions'])}  |  Closed trades all-time: {len(state['closed_trades'])}")
     print(f"State saved to {STATE_PATH}")
