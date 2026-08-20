@@ -115,6 +115,77 @@ class TestSizePosition(unittest.TestCase):
         self.assertLessEqual(size, 100.0 * 0.1 + 1e-9)
 
 
+class TestSelectCandidatesForRotation(unittest.TestCase):
+    """select_candidates_for_rotation() ensures discovery's max_candidates cap
+    rotates across the full discovered set over multiple cycles, instead of
+    always evaluating the same head-of-list tokens -- verified live that a
+    real cycle found 63 unique candidates against a cap of 40, permanently
+    starving the last 23 under the old fixed-order truncation."""
+
+    def test_unseen_candidates_prioritized_over_recently_evaluated(self):
+        all_mints = ["A", "B", "C", "D"]
+        recently_evaluated = {"A", "B"}
+        result = p.select_candidates_for_rotation(all_mints, max_candidates=2, recently_evaluated=recently_evaluated)
+        self.assertEqual(set(result), {"C", "D"})
+
+    def test_falls_back_to_recently_evaluated_when_not_enough_unseen(self):
+        all_mints = ["A", "B", "C"]
+        recently_evaluated = {"A", "B"}
+        result = p.select_candidates_for_rotation(all_mints, max_candidates=3, recently_evaluated=recently_evaluated)
+        self.assertEqual(set(result), {"A", "B", "C"})
+
+    def test_held_position_always_included_even_if_recently_evaluated(self):
+        all_mints = ["HELD", "B", "C", "D", "E"]
+        recently_evaluated = {"HELD"}  # was bought before, so it's "recently evaluated" -- must not be excluded
+        result = p.select_candidates_for_rotation(all_mints, max_candidates=2, recently_evaluated=recently_evaluated,
+                                                    held_mints={"HELD"})
+        self.assertIn("HELD", result)
+
+    def test_held_position_does_not_count_against_the_cap(self):
+        all_mints = ["HELD", "B", "C", "D"]
+        result = p.select_candidates_for_rotation(all_mints, max_candidates=2, recently_evaluated=set(),
+                                                    held_mints={"HELD"})
+        # HELD plus a full 2 slots of non-held candidates
+        self.assertEqual(len(result), 3)
+        self.assertIn("HELD", result)
+
+    def test_no_rotation_needed_when_everything_fits_under_the_cap(self):
+        all_mints = ["A", "B"]
+        result = p.select_candidates_for_rotation(all_mints, max_candidates=10, recently_evaluated=set())
+        self.assertEqual(set(result), {"A", "B"})
+
+
+class TestDiscoveryRotationPersistence(unittest.TestCase):
+    def setUp(self):
+        self._orig_path = p.DISCOVERY_ROTATION_PATH
+        p.DISCOVERY_ROTATION_PATH = Path(__file__).resolve().parent / "_tmp_discovery_rotation_test.json"
+        if p.DISCOVERY_ROTATION_PATH.exists():
+            p.DISCOVERY_ROTATION_PATH.unlink()
+
+    def tearDown(self):
+        if p.DISCOVERY_ROTATION_PATH.exists():
+            p.DISCOVERY_ROTATION_PATH.unlink()
+        p.DISCOVERY_ROTATION_PATH = self._orig_path
+
+    def test_empty_when_no_file_exists(self):
+        self.assertEqual(p._load_recently_evaluated(), set())
+
+    def test_round_trip_through_save_and_load(self):
+        p._save_recently_evaluated(["A", "B", "C"], max_candidates=10)
+        self.assertEqual(p._load_recently_evaluated(), {"A", "B", "C"})
+
+    def test_history_window_is_bounded_and_old_entries_age_out(self):
+        # max_candidates=2, history=DISCOVERY_ROTATION_HISTORY_CYCLES(3) -> keeps last 6 entries
+        p._save_recently_evaluated(["A", "B"], max_candidates=2)
+        p._save_recently_evaluated(["C", "D"], max_candidates=2)
+        p._save_recently_evaluated(["E", "F"], max_candidates=2)
+        p._save_recently_evaluated(["G", "H"], max_candidates=2)
+        recent = p._load_recently_evaluated()
+        self.assertNotIn("A", recent, "oldest cycle's mints should have aged out of the bounded window")
+        self.assertIn("G", recent)
+        self.assertIn("H", recent)
+
+
 class TestRegimeCache(unittest.TestCase):
     """regime_allows_new_entries() caches its result for
     REGIME_CACHE_TTL_SECONDS instead of hitting CoinGecko every paper cycle

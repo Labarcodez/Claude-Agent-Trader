@@ -25,6 +25,11 @@ state/regime_cache.json
 # same reasoning, short-lived (PRICE_HISTORY_CACHE_TTL_SECONDS).
 state/price_history_cache/
 
+# Discovery rotation history (paper_trading/run_paper_cycle.py) -- a rolling
+# FIFO of recently-evaluated mints so discovery's max_candidates cap rotates
+# across cycles instead of always favoring the same head-of-list tokens.
+state/discovery_rotation.json
+
 # Live starting-capital baseline -- created by trade-cycle's first real
 # cycle from the wallet's actual funded balance (see config/risk.yaml
 # "Capital" and trade-cycle SKILL.md step 2). There's no fixed/shipped

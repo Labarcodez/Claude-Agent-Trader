@@ -63,6 +63,10 @@ PRICE_HISTORY_CACHE_TTL_SECONDS = 3600  # same reasoning as the regime cache: a 
                                           # change within 15 minutes, but signal generation re-fetches every
                                           # eligible candidate's history every cycle -- the dominant source of
                                           # CoinGecko rate-limit backoff once discovery finds several candidates
+DISCOVERY_ROTATION_PATH = REPO_ROOT / "state" / "discovery_rotation.json"
+DISCOVERY_ROTATION_HISTORY_CYCLES = 3  # remember roughly this many cycles' worth of evaluated mints -- a
+                                         # bounded, FIFO "recently seen" window, not permanent exclusion, so a
+                                         # token drops back into rotation once enough cycles have passed
 
 TIER_MULTIPLIERS = {"blue_chip": 1.0, "established": 0.7, "emerging": 0.4}
 
@@ -95,6 +99,64 @@ def append_journal(entry: dict) -> None:
     JOURNAL_PATH.parent.mkdir(parents=True, exist_ok=True)
     with JOURNAL_PATH.open("a") as f:
         f.write(json.dumps(entry) + "\n")
+
+
+# ---- Discovery rotation --------------------------------------------------------
+# gather_candidates() returns more unique mints than max_candidates can afford to
+# fully evaluate (RugCheck is a real, rate-limited cost per stage-1 survivor) --
+# e.g. a live run found 63 unique candidates against a cap of 40. Naively taking
+# the first max_candidates in gather_candidates()'s fixed source-priority order
+# means the same ~23 candidates at the tail NEVER get evaluated, cycle after
+# cycle, since Jupiter's organic/trending lists don't reshuffle drastically
+# within 15 minutes. This rotates which candidates get the cap's worth of
+# evaluation slots across cycles instead of always favoring the same head of
+# the list, so real breadth (config/discovery.yaml's own stated goal) actually
+# gets used session-wide, not just in any one cycle's snapshot.
+
+def _load_recently_evaluated() -> set[str]:
+    if not DISCOVERY_ROTATION_PATH.exists():
+        return set()
+    try:
+        data = json.loads(DISCOVERY_ROTATION_PATH.read_text())
+    except (json.JSONDecodeError, OSError):
+        return set()
+    return set(data.get("recently_evaluated_ordered", []))
+
+
+def _save_recently_evaluated(mints_this_cycle: list[str], max_candidates: int) -> None:
+    prior: list[str] = []
+    if DISCOVERY_ROTATION_PATH.exists():
+        try:
+            prior = json.loads(DISCOVERY_ROTATION_PATH.read_text()).get("recently_evaluated_ordered", [])
+        except (json.JSONDecodeError, OSError):
+            prior = []
+    combined = prior + mints_this_cycle
+    cap = max_candidates * DISCOVERY_ROTATION_HISTORY_CYCLES
+    combined = combined[-cap:]  # bounded FIFO -- old entries age out, letting those tokens rotate back in
+    DISCOVERY_ROTATION_PATH.parent.mkdir(parents=True, exist_ok=True)
+    DISCOVERY_ROTATION_PATH.write_text(json.dumps({
+        "recently_evaluated_ordered": combined,
+        "updated_at": datetime.now(timezone.utc).isoformat(),
+    }))
+
+
+def select_candidates_for_rotation(all_mints: list[str], max_candidates: int, recently_evaluated: set[str],
+                                    held_mints: set[str] | None = None) -> list[str]:
+    """Picks which of all_mints get this cycle's max_candidates evaluation
+    slots. Any mint currently held as an open position is always included
+    (doesn't count against the cap) -- an existing position must never
+    silently fall out of consideration for a strategy-driven exit just
+    because rotation deprioritized it (config/discovery.yaml's
+    pinned_candidates documents this exact intent for open positions).
+    Among the rest, mints NOT in recently_evaluated go first, so the cap's
+    slots rotate across the full discovered set over multiple cycles instead
+    of always going to whichever tokens happen to sort first."""
+    held_mints = held_mints or set()
+    held_in_pool = [m for m in all_mints if m in held_mints]
+    rest = [m for m in all_mints if m not in held_mints]
+    unseen = [m for m in rest if m not in recently_evaluated]
+    seen = [m for m in rest if m in recently_evaluated]
+    return held_in_pool + (unseen + seen)[:max_candidates]
 
 
 # ---- Pricing ------------------------------------------------------------------
@@ -301,7 +363,9 @@ def run_cycle(args):
     candidates = disco.gather_candidates(argparse.Namespace(
         no_organic=False, no_trending=False, no_recent=False, limit_per_source=args.limit_per_source,
     ))
-    mints = list(candidates.keys())[: args.max_candidates]
+    recently_evaluated = _load_recently_evaluated()
+    mints = select_candidates_for_rotation(list(candidates.keys()), args.max_candidates, recently_evaluated,
+                                            held_mints=set(state["positions"]))
     eligible: dict[str, dict] = {}
     rejected_count = 0
     for mint in mints:
@@ -310,6 +374,7 @@ def run_cycle(args):
             eligible[mint] = result
         else:
             rejected_count += 1
+    _save_recently_evaluated(mints, args.max_candidates)
     print(f"Discovery: {len(candidates)} found, {len(mints)} evaluated, {len(eligible)} eligible, {rejected_count} rejected.")
 
     # include existing paper positions even if they fell out of discovery this cycle
