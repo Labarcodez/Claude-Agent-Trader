@@ -71,12 +71,17 @@ DISCOVERY_ROTATION_PATH = REPO_ROOT / "state" / "discovery_rotation.json"
 DISCOVERY_ROTATION_HISTORY_CYCLES = 3  # remember roughly this many cycles' worth of evaluated mints -- a
                                          # bounded, FIFO "recently seen" window, not permanent exclusion, so a
                                          # token drops back into rotation once enough cycles have passed
-MAX_FRESH_PRICE_HISTORY_FETCHES_PER_CYCLE = 8  # discovery now rotates through a ~2,600-token pool, so most
+MAX_FRESH_PRICE_HISTORY_FETCHES_PER_CYCLE = 5  # discovery now rotates through a ~2,600-token pool, so most
                                                  # eligible candidates each cycle are price_history_cache misses
-                                                 # (never seen before) -- observed live: 6-8 fresh CoinGecko
-                                                 # fetches in one cycle took 1m40s-1m50s from repeated 429
-                                                 # backoff (vs ~13s typical). Capping bounds cycle duration;
-                                                 # deferred candidates are simply reconsidered next cycle.
+                                                 # (never seen before). A single fetch's worst case is ~100s
+                                                 # (backtest/fetch_history.py's own retry policy: 4 attempts,
+                                                 # 10/20/30/40s backoff) -- observed live, even just 5-6 fresh
+                                                 # fetches in one cycle repeatedly cost 1m40s-1m50s, not the
+                                                 # ~13s typical. Was 8; lowered because worst case (cap *
+                                                 # ~100s) was starting to approach the 15-minute cycle
+                                                 # interval closely enough to risk cycle overlap during a
+                                                 # genuinely bad CoinGecko stretch. Deferred candidates are
+                                                 # simply reconsidered next cycle, no correctness loss.
 
 TIER_MULTIPLIERS = {"blue_chip": 1.0, "established": 0.7, "emerging": 0.4}
 
