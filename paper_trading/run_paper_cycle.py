@@ -915,20 +915,25 @@ def run_cycle(args):
             size_usd = size_position(tier, port_value, closes, args)
             is_scout = tier == "scout"
             if is_scout:
-                # Initial scout entry is deliberately tiny (default 20% of
-                # the tier-target size) -- "starting with a small initial
-                # scout position, adding funds only if price action confirms
-                # momentum" (see the scale-in loop above). Uses its own,
-                # lower min-trade floor: a full-size scout stake on a small
-                # paper portfolio can land under the normal $5 min_trade_usd
-                # (e.g. ~$1-2), which would make every scout entry
-                # unconditionally too small to trade under the normal floor.
-                size_usd *= args.scout_position_fraction
-                min_trade_floor = args.scout_min_trade_usd
-            else:
-                min_trade_floor = args.min_trade_usd
-            if size_usd < min_trade_floor:
-                not_traded[mint] = f"sized position ${size_usd:.2f} below min trade floor (${min_trade_floor:.2f})"
+                # Initial scout entry starts at 20% of the tier-target size
+                # -- "starting with a small initial scout position, adding
+                # funds only if price action confirms momentum" (see the
+                # scale-in loop above) -- then is floored UP to at least
+                # --scout-min-trade-usd (default $2.50) if that's larger.
+                # Explicit user request ("raise scouts to $2 or $3 per
+                # token"): on this portfolio's size, the 20%-of-target
+                # formula alone was landing at ~$1.35-1.55, well under what
+                # was asked for. This is a floor, not a fixed size -- on a
+                # larger portfolio the formula-driven amount can still
+                # exceed it and grow normally from there. Raising this
+                # doesn't raise the memecoin exposure ceiling
+                # (max_memecoin_exposure_fraction, left at 20% per an
+                # explicit decision not to increase it further) -- it just
+                # means each scout slot costs more against that same fixed
+                # ceiling, so fewer concurrent scout positions fit under it.
+                size_usd = max(size_usd * args.scout_position_fraction, args.scout_min_trade_usd)
+            elif size_usd < args.min_trade_usd:
+                not_traded[mint] = f"sized position ${size_usd:.2f} below min_trade_usd (${args.min_trade_usd:.2f})"
                 continue
             if size_usd > state["cash_usd"]:
                 not_traded[mint] = f"sized position ${size_usd:.2f} exceeds available cash (${state['cash_usd']:.2f})"
@@ -1178,9 +1183,13 @@ def main():
     ap.add_argument("--scout-position-fraction", dest="scout_position_fraction", type=float, default=0.20,
                      help="initial scout entry = this fraction of the tier-target size ('starting with a small "
                           "initial scout position')")
-    ap.add_argument("--scout-min-trade-usd", dest="scout_min_trade_usd", type=float, default=1.0,
-                     help="separate, lower floor than --min-trade-usd -- a full scout-tier target size on a small "
-                          "paper portfolio, times scout_position_fraction, is often ~$1-2")
+    ap.add_argument("--scout-min-trade-usd", dest="scout_min_trade_usd", type=float, default=2.5,
+                     help="floor an initial scout entry up to at least this much (see the new-entry loop's "
+                          "is_scout branch) rather than rejecting it outright like --min-trade-usd does for "
+                          "other tiers. Was $1.00 (the formula-driven 20%%-of-target size alone landed at "
+                          "~$1.35-1.55 on this portfolio); raised to $2.50 on explicit user request ('raise "
+                          "scouts to $2 or $3 per token'). Still just a floor -- a larger portfolio's "
+                          "formula-driven size can exceed it and grow normally from there.")
     ap.add_argument("--scale-in-price-threshold-pct", dest="scale_in_price_threshold_pct", type=float, default=0.15,
                      help="price up this much from scout entry = 'price action confirms momentum' -> top up to "
                           "the full tier-target size")
