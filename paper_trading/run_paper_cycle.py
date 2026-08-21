@@ -97,17 +97,25 @@ DISCOVERY_ROTATION_PATH = REPO_ROOT / "state" / "discovery_rotation.json"
 DISCOVERY_ROTATION_HISTORY_CYCLES = 3  # remember roughly this many cycles' worth of evaluated mints -- a
                                          # bounded, FIFO "recently seen" window, not permanent exclusion, so a
                                          # token drops back into rotation once enough cycles have passed
-MAX_FRESH_PRICE_HISTORY_FETCHES_PER_CYCLE = 5  # discovery now rotates through a ~2,600-token pool, so most
+MAX_FRESH_PRICE_HISTORY_FETCHES_PER_CYCLE = 7  # discovery now rotates through a ~2,600-token pool, so most
                                                  # eligible candidates each cycle are price_history_cache misses
                                                  # (never seen before). A single fetch's worst case is ~100s
                                                  # (backtest/fetch_history.py's own retry policy: 4 attempts,
                                                  # 10/20/30/40s backoff) -- observed live, even just 5-6 fresh
                                                  # fetches in one cycle repeatedly cost 1m40s-1m50s, not the
-                                                 # ~13s typical. Was 8; lowered because worst case (cap *
-                                                 # ~100s) was starting to approach the 15-minute cycle
-                                                 # interval closely enough to risk cycle overlap during a
-                                                 # genuinely bad CoinGecko stretch. Deferred candidates are
-                                                 # simply reconsidered next cycle, no correctness loss.
+                                                 # ~13s typical. Was 8, then lowered to 5 over cycle-overlap risk
+                                                 # against what was then a 15-minute loop interval. Raised back
+                                                 # up (not all the way -- 6, then reconsidered to 7) now that
+                                                 # two things changed: CycleLock (see that class) means an
+                                                 # overrunning cycle now just makes the next scheduled run wait
+                                                 # for the lock instead of corrupting shared state, and
+                                                 # max_concurrent_positions going 10->15 means more slots need
+                                                 # filling with genuinely fresh candidates per cycle to actually
+                                                 # get used rather than sitting open. Typical observed cycle
+                                                 # time stayed ~60-90s even before this change, well under the
+                                                 # current 5-minute interval -- the ~100s/fetch figure above is
+                                                 # a rare worst case, not the norm. Deferred candidates are
+                                                 # simply reconsidered next cycle either way, no correctness loss.
 
 TIER_MULTIPLIERS = {"blue_chip": 1.0, "established": 0.7, "emerging": 0.4, "scout": 0.4}
 MEMECOIN_TIERS = {"scout", "emerging"}  # what counts toward max_memecoin_exposure_fraction
@@ -1096,14 +1104,16 @@ def main():
     ap.add_argument("--max-position-fraction", dest="max_position_fraction", type=float, default=0.30)
     ap.add_argument("--max-position-usd", dest="max_position_usd", type=float, default=20.0)
     ap.add_argument("--min-trade-usd", dest="min_trade_usd", type=float, default=5.0)
-    ap.add_argument("--max-concurrent-positions", dest="max_concurrent_positions", type=int, default=10,
-                     help="Was 3, then 6 -- raised again after discovery began reliably finding 5-8 scout-tier "
-                          "candidates per cycle, all rejected with 'no open slots' at 6 even though the "
-                          "scout-specific cap (max_scout_positions=5) and the dollar-based "
-                          "max_memecoin_exposure_fraction cap both still had room (verified live: 2 established "
-                          "+ 1 emerging + 3 scout = 6, hitting this cap specifically, not either of those). "
-                          "Raising this doesn't raise dollar risk on its own -- total memecoin exposure is still "
-                          "independently bounded -- it only lets that same bounded exposure spread across more, "
+    ap.add_argument("--max-concurrent-positions", dest="max_concurrent_positions", type=int, default=15,
+                     help="Was 3, then 6, then 10, now 15 (explicit user request, to surface more of the "
+                          "~2,600-token rotated discovery pool as actual positions instead of 'no open slots' "
+                          "rejections). At 10, this had become the dominant rejection reason for most cycles in "
+                          "a row -- discovery was routinely finding 10-16 eligible candidates/cycle with all 10 "
+                          "slots full, so genuinely new, never-before-seen tokens were being turned away purely "
+                          "on count, not on any risk check. Raising this doesn't raise dollar risk on its own -- "
+                          "total memecoin exposure is still independently bounded by "
+                          "max_memecoin_exposure_fraction, and non-memecoin tiers are still bounded by cash and "
+                          "max_portfolio_heat_pct -- it only lets that same bounded exposure spread across more, "
                           "smaller positions instead of artificially throttling diversification.")
     ap.add_argument("--max-emerging-tier-positions", dest="max_emerging_tier_positions", type=int, default=2)
     ap.add_argument("--target-daily-volatility-pct", dest="target_daily_volatility_pct", type=float, default=3.0)
