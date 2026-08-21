@@ -725,7 +725,24 @@ def run_cycle(args):
                 exit_reason = f"take-profit ({ret:+.1%})"
             elif ret > 0 and drawdown_from_peak <= -args.trailing_stop_pct:
                 exit_reason = f"trailing-stop ({drawdown_from_peak:+.1%} from peak)"
-        if exit_reason is None and mint in eligible:
+        if exit_reason is None and not pos.get("profit_taken"):
+            # Deliberately NOT gated on `mint in eligible` (a real gap this
+            # had since the original implementation, uncommented and
+            # unexplained): eligibility is a discovery-time safety gate
+            # (liquidity, holder count, organic score, top-holder
+            # concentration...) about whether it's safe to newly BUY a
+            # token, not about its price trend -- and it's exactly the kind
+            # of thing that fluctuates cycle to cycle for the thin/new
+            # tokens scout tier holds. Gating the sell-signal check on it
+            # meant a held position that dipped out of eligibility for a
+            # reason unrelated to price (say, a holder-count blip) silently
+            # lost its strategy-exit protection until it requalified -- for
+            # exactly the tokens most likely to need it. The file's own
+            # comment above ("exits are never regime-gated") already states
+            # the right principle; this just applies it consistently. A
+            # house-money (profit_taken) position is excluded here since it
+            # already has its own house-money trailing-stop path above and
+            # deliberately has no other exit rule.
             closes = get_price_history_closes(mint, args.history_days)
             if closes and compute_signal(closes) == "sell":
                 exit_reason = "strategy sell signal"
