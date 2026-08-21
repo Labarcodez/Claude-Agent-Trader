@@ -4,6 +4,7 @@ Run: python3 -m unittest discover -s tests -v"""
 import argparse
 import json
 import sys
+import time
 import unittest
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -198,6 +199,55 @@ class TestComputeScaleInTopup(unittest.TestCase):
             exposure_room_usd=-5.0, min_trade_usd=1.0)
         self.assertEqual(amount, 0.0)
         self.assertEqual(reason, "insufficient_room")
+
+
+class TestCycleLock(unittest.TestCase):
+    """CycleLock guards a paper-trading cycle against a second concurrent
+    run_paper_cycle.py process (e.g. this session's cron loop and a separate
+    local terminal loop both pointed at the same state/journal files -- a
+    real setup, not hypothetical). Mining the journal found two
+    near-simultaneous buy/sell pairs on the same symbol (MET, RIZO), seconds
+    apart, identical size and return_pct -- the signature of two processes
+    each reading the same pre-trade state and independently making the same
+    decision before either had written back."""
+
+    def setUp(self):
+        self.lock_path = Path(__file__).resolve().parent / "_tmp_cycle_lock_test.lock"
+        if self.lock_path.exists():
+            self.lock_path.unlink()
+
+    def tearDown(self):
+        if self.lock_path.exists():
+            self.lock_path.unlink()
+
+    def test_acquires_and_releases_cleanly(self):
+        with p.CycleLock(self.lock_path):
+            self.assertTrue(self.lock_path.exists())
+        self.assertFalse(self.lock_path.exists(), "lock file must be removed on exit")
+
+    def test_second_acquire_blocks_until_first_releases(self):
+        import threading
+        order = []
+        lock = p.CycleLock(self.lock_path, timeout=5.0, poll=0.02)
+        with lock:
+            def try_acquire():
+                with p.CycleLock(self.lock_path, timeout=5.0, poll=0.02):
+                    order.append("second")
+            t = threading.Thread(target=try_acquire)
+            t.start()
+            time.sleep(0.15)  # give the second thread a chance to (wrongly) sneak in
+            order.append("first-still-holding")
+            t.join(timeout=5.0)
+        self.assertEqual(order, ["first-still-holding", "second"],
+                          "a concurrent acquire must wait for the held lock, not proceed immediately")
+
+    def test_stale_lock_is_broken_after_timeout(self):
+        # simulate a lock left behind by a crashed process -- must not deadlock forever
+        self.lock_path.write_text("")
+        start = time.time()
+        with p.CycleLock(self.lock_path, timeout=0.2, poll=0.05):
+            pass
+        self.assertLess(time.time() - start, 5.0, "a stale lock should be broken quickly, not hang")
 
 
 class TestMemecoinExposureUsd(unittest.TestCase):

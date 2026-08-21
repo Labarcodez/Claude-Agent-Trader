@@ -30,6 +30,11 @@ state/price_history_cache/
 # across cycles instead of always favoring the same head-of-list tokens.
 state/discovery_rotation.json
 
+# Cross-process lock guarding a paper-trading cycle's state read-modify-write
+# (paper_trading/run_paper_cycle.py's CycleLock) -- exists only for the
+# duration of one cycle, never meant to be committed.
+state/paper_cycle.lock
+
 # Live starting-capital baseline -- created by trade-cycle's first real
 # cycle from the wallet's actual funded balance (see config/risk.yaml
 # "Capital" and trade-cycle SKILL.md step 2). There's no fixed/shipped

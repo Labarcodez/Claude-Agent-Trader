@@ -55,6 +55,7 @@ Usage:
 from __future__ import annotations
 import argparse
 import json
+import os
 import random
 import sys
 import time
@@ -77,6 +78,7 @@ from backtest import strategies as strat  # noqa: E402
 
 STATE_PATH = REPO_ROOT / "state" / "paper_portfolio.json"
 JOURNAL_PATH = REPO_ROOT / "journal" / "paper_trades.jsonl"
+LOCK_PATH = REPO_ROOT / "state" / "paper_cycle.lock"
 REGIME_CACHE_PATH = REPO_ROOT / "state" / "regime_cache.json"
 REGIME_CACHE_TTL_SECONDS = 3600  # regime is a daily-scale (30d SMA) signal -- refetching every 15min cycle is
                                   # unnecessary load on CoinGecko's free tier for no real freshness gain
@@ -127,6 +129,56 @@ def load_state(starting_capital_usd: float, reset: bool) -> dict:
 def save_state(state: dict) -> None:
     STATE_PATH.parent.mkdir(parents=True, exist_ok=True)
     STATE_PATH.write_text(json.dumps(state, indent=2))
+
+
+class CycleLock:
+    """Guards the whole cycle against a second concurrent run_paper_cycle.py
+    process (e.g. this session's cron loop and a separate local terminal loop
+    both pointed at the same state/journal files -- a real setup mentioned in
+    this project's own history, not a hypothetical). Without this, two
+    processes each load_state() before either save_state()s: both see the
+    same cash/positions, both independently decide to buy the same candidate
+    or exit the same position, and whichever process's save_state() write
+    lands second silently clobbers the first's -- the journal (append-only)
+    still records both decisions, so the audit trail shows a trade that the
+    portfolio state never actually reflects. That exact signature -- two
+    near-simultaneous buy/sell pairs on the same symbol, seconds apart,
+    identical size and return_pct -- is what mining the journal turned up for
+    MET and RIZO, which is what prompted this fix.
+
+    os.O_CREAT | os.O_EXCL is an atomic exclusive-create on both POSIX and
+    Windows, so this needs no extra dependency (this project stays
+    dependency-free). A stale lock (left behind by a crashed/killed process)
+    is broken after `timeout` seconds rather than deadlocking the system
+    forever -- an unattended cron loop has no one around to clear it by hand."""
+
+    def __init__(self, path: Path, timeout: float = 280.0, poll: float = 0.5):
+        self.path = path
+        self.timeout = timeout
+        self.poll = poll
+
+    def __enter__(self):
+        start = time.time()
+        while True:
+            try:
+                fd = os.open(str(self.path), os.O_CREAT | os.O_EXCL | os.O_WRONLY)
+                os.close(fd)
+                return self
+            except FileExistsError:
+                if time.time() - start > self.timeout:
+                    try:
+                        self.path.unlink()
+                    except OSError:
+                        pass
+                    continue
+                time.sleep(self.poll)
+
+    def __exit__(self, exc_type, exc_val, exc_tb):
+        try:
+            os.remove(str(self.path))
+        except OSError:
+            pass
+        return False
 
 
 def append_journal(entry: dict) -> None:
@@ -1074,7 +1126,8 @@ def main():
                           "the 5%% budget and blocked every scout/emerging entry indefinitely. Independent of the "
                           "per-tier position COUNT caps, which don't bound total dollar exposure on their own.")
     args = ap.parse_args()
-    run_cycle(args)
+    with CycleLock(LOCK_PATH):
+        run_cycle(args)
 
 
 if __name__ == "__main__":
