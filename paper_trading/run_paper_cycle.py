@@ -931,12 +931,15 @@ def main():
     ap.add_argument("--max-position-fraction", dest="max_position_fraction", type=float, default=0.30)
     ap.add_argument("--max-position-usd", dest="max_position_usd", type=float, default=20.0)
     ap.add_argument("--min-trade-usd", dest="min_trade_usd", type=float, default=5.0)
-    ap.add_argument("--max-concurrent-positions", dest="max_concurrent_positions", type=int, default=6,
-                     help="Was 3 -- raised so the scout tier has room to actually operate: scout entries are "
-                          "$1-2 each (scout_position_fraction of an already-small tier size), so more concurrent "
-                          "slots barely moves total dollar risk, but the old cap of 3 was fully consumed by "
-                          "blue_chip/established/emerging positions alone, locking scout out entirely (verified "
-                          "live: 3 scout-tier candidates found, all rejected with 'no open slots').")
+    ap.add_argument("--max-concurrent-positions", dest="max_concurrent_positions", type=int, default=10,
+                     help="Was 3, then 6 -- raised again after discovery began reliably finding 5-8 scout-tier "
+                          "candidates per cycle, all rejected with 'no open slots' at 6 even though the "
+                          "scout-specific cap (max_scout_positions=5) and the dollar-based "
+                          "max_memecoin_exposure_fraction cap both still had room (verified live: 2 established "
+                          "+ 1 emerging + 3 scout = 6, hitting this cap specifically, not either of those). "
+                          "Raising this doesn't raise dollar risk on its own -- total memecoin exposure is still "
+                          "independently bounded -- it only lets that same bounded exposure spread across more, "
+                          "smaller positions instead of artificially throttling diversification.")
     ap.add_argument("--max-emerging-tier-positions", dest="max_emerging_tier_positions", type=int, default=2)
     ap.add_argument("--target-daily-volatility-pct", dest="target_daily_volatility_pct", type=float, default=3.0)
     ap.add_argument("--volatility-size-min-mult", dest="volatility_size_min_mult", type=float, default=0.5)
