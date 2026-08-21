@@ -440,6 +440,27 @@ def compute_partial_profit_take(cost_basis_usd: float, quantity: float, price: f
     return min(cost_basis_usd / price, quantity)  # never sell more than we hold
 
 
+def compute_scale_in_topup(cost_basis_usd: float, full_target_size: float, cash_usd: float,
+                            exposure_room_usd: float, min_trade_usd: float) -> tuple[float, str | None]:
+    """Pure sizing decision for a scout position's momentum-confirmed scale-in,
+    split out of run_cycle's scale-in loop so it's unit-testable without
+    mocking the whole cycle (mirrors compute_partial_profit_take above).
+    Returns (amount_to_add_usd, skip_reason): skip_reason is None when a
+    top-up -- possibly smaller than the full gap to full_target_size, capped
+    to whatever fits under cash/exposure room -- should proceed;
+    amount_to_add_usd is 0.0 whenever skip_reason is set. Caps to available
+    room rather than an all-or-nothing skip: a position that legitimately
+    confirmed momentum shouldn't get stuck forever just because the FULL
+    top-up doesn't fit under the exposure cap while partial room exists."""
+    additional_needed = full_target_size - cost_basis_usd
+    if additional_needed < min_trade_usd:
+        return 0.0, "already_full"
+    capped_needed = min(additional_needed, cash_usd, max(exposure_room_usd, 0.0))
+    if capped_needed < min_trade_usd:
+        return 0.0, "insufficient_room"
+    return capped_needed, None
+
+
 def portfolio_heat_pct(state: dict, prices: dict[str, float], stop_loss_pct: float) -> float:
     value = portfolio_value_usd(state, prices)
     if value <= 0:
@@ -644,6 +665,15 @@ def run_cycle(args):
     # allow_new_entries like any other addition of fresh capital at risk --
     # the regime filter existing to block *new* risk during risk-off applies
     # to growing a position's exposure too, not just opening a brand new one.
+    # not_scaled_in mirrors not_traded's audit purpose for this loop -- a
+    # real gap found by mining the journal: after 383 cycles and a position
+    # (GIKO) that clearly reached scaled_in=True in the live state, the
+    # journal showed ZERO scale_in actions ever recorded. Root cause: the
+    # "too small to bother" branch below silently flipped scaled_in=True
+    # without ever buying anything and without logging why -- indistinguishable
+    # from a real scale-in without reading raw state. Every branch that skips
+    # a scale-in now records a reason, same discipline as new-entry rejections.
+    not_scaled_in: dict[str, str] = {}
     if allow_new_entries:
         for mint, pos in list(state["positions"].items()):
             if pos.get("tier") != "scout" or pos.get("scaled_in") or pos.get("profit_taken"):
@@ -652,21 +682,34 @@ def run_cycle(args):
             if price is None:
                 continue
             if price < pos["entry_price_usd"] * (1 + args.scale_in_price_threshold_pct):
-                continue
+                continue  # hasn't confirmed momentum yet -- not a rejection worth logging, just not due yet
             closes = get_price_history_closes(mint, args.history_days)
             full_target_size = size_position("scout", port_value, closes, args)
-            additional_needed = full_target_size - pos.get("cost_basis_usd", 0.0)
-            if additional_needed < args.min_trade_usd:
+            cost_basis = pos.get("cost_basis_usd", 0.0)
+            exposure_room = args.max_memecoin_exposure_fraction * port_value - memecoin_exposure_usd(state, prices)
+            additional_needed, skip_reason = compute_scale_in_topup(
+                cost_basis, full_target_size, state["cash_usd"], exposure_room, args.min_trade_usd)
+            if skip_reason == "already_full":
                 pos["scaled_in"] = True  # already close enough to full size, or too small a top-up to bother
+                not_scaled_in[mint] = (f"full target size (${full_target_size:.2f}) is within min_trade_usd "
+                                        f"(${args.min_trade_usd:.2f}) of what's already invested "
+                                        f"(${cost_basis:.2f}) -- treating as fully sized, "
+                                        f"marked scaled_in without buying more")
                 continue
-            additional_needed = min(additional_needed, state["cash_usd"])
-            if additional_needed < args.min_trade_usd:
-                continue  # can't afford a meaningful top-up right now -- retry next cycle, don't mark scaled_in
-            if memecoin_exposure_usd(state, prices) + additional_needed > args.max_memecoin_exposure_fraction * port_value:
-                continue  # would breach the aggregate memecoin cap -- retry next cycle if room opens up
+            if skip_reason == "insufficient_room":
+                # Wanted a top-up but nothing (or too little) fits under
+                # cash/exposure room right now -- retry next cycle, don't
+                # mark scaled_in. Exposure has repeatedly sat near the cap
+                # live (37 new-entry rejections for this exact reason), so
+                # this is the common case, not an edge case.
+                not_scaled_in[mint] = (f"wanted to add ${full_target_size - cost_basis:.2f} but insufficient "
+                                        f"cash/exposure room fits under min_trade_usd (${args.min_trade_usd:.2f}) "
+                                        f"-- retrying next cycle, not marked scaled_in")
+                continue
             projected_heat = (portfolio_heat_pct(state, prices, args.stop_loss_pct)
                                + (additional_needed * args.stop_loss_pct / port_value if port_value else 0))
             if projected_heat > args.max_portfolio_heat_pct:
+                not_scaled_in[mint] = f"would exceed max_portfolio_heat_pct ({projected_heat:.1%})"
                 continue
             fill_price = price * (1 + args.slippage_bps / 10_000)
             added_quantity = (additional_needed * (1 - args.fee_bps / 10_000)) / fill_price
@@ -676,9 +719,13 @@ def run_cycle(args):
             pos["entry_price_usd"] = total_cost / total_quantity  # blended avg cost -- ret/stop-loss/take-profit all key off this
             pos["quantity"] = total_quantity
             pos["cost_basis_usd"] = total_cost
-            pos["scaled_in"] = True
+            # Only mark fully scaled-in if this top-up actually reached the
+            # full target -- a capped partial top-up should get another
+            # chance to top up the rest next cycle if room opens up.
+            pos["scaled_in"] = total_cost >= full_target_size - 1e-9
             actions.append({"type": "scale_in", "symbol": pos["symbol"], "mint": mint,
                              "size_usd": additional_needed, "fill_price": fill_price,
+                             "partial": not pos["scaled_in"],
                              "reason": f"price confirmed momentum (+{args.scale_in_price_threshold_pct:.0%} from scout entry)"})
 
     # ---- consider new entries ----
@@ -828,6 +875,8 @@ def run_cycle(args):
         "discovery": {"found": len(candidates), "evaluated": len(mints), "eligible": len(eligible), "rejected": rejected_count},
         "actions": actions,
         "not_traded": {mint: {"symbol": eligible[mint]["symbol"], "reason": reason} for mint, reason in not_traded.items()},
+        "not_scaled_in": {mint: {"symbol": state["positions"][mint]["symbol"], "reason": reason}
+                           for mint, reason in not_scaled_in.items()},
         "open_positions": len(state["positions"]),
     })
 
@@ -836,7 +885,8 @@ def run_cycle(args):
         if a["type"] == "buy":
             print(f"  BUY       {a['symbol']:>10}  ${a['size_usd']:.2f}  tier={a['tier']:<10}  ({a['signal_basis']})")
         elif a["type"] == "scale_in":
-            print(f"  SCALE-IN  {a['symbol']:>10}  +${a['size_usd']:.2f}  ({a['reason']})")
+            partial_note = " [partial]" if a.get("partial") else ""
+            print(f"  SCALE-IN  {a['symbol']:>10}  +${a['size_usd']:.2f}{partial_note}  ({a['reason']})")
         elif a["type"] == "partial_sell":
             print(f"  TAKE-PART {a['symbol']:>10}  sold {a['quantity_sold']:.4g} (${a['proceeds_usd']:.2f})  "
                   f"{a['reason']}, {a['remaining_quantity']:.4g} riding free")
@@ -846,6 +896,10 @@ def run_cycle(args):
         print(f"\nEligible but not traded ({len(not_traded)}):")
         for mint, reason in not_traded.items():
             print(f"  {eligible[mint]['symbol']:>10}  {reason}")
+    if not_scaled_in:
+        print(f"\nConfirmed momentum but not scaled in ({len(not_scaled_in)}):")
+        for mint, reason in not_scaled_in.items():
+            print(f"  {state['positions'][mint]['symbol']:>10}  {reason}")
     before_note = "  (pricing was incomplete at cycle start -- showing best available estimate, not a same-cycle move)" if not port_value_reliable else ""
     print(f"\nPortfolio value: ${reported_before:.2f} -> ${final_value:.2f}{before_note}  "
           f"(total return since start: {(final_value / state['starting_capital_usd'] - 1) * 100:+.1f}%)")

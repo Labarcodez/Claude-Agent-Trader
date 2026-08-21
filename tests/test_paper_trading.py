@@ -143,6 +143,63 @@ class TestComputePartialProfitTake(unittest.TestCase):
         self.assertLessEqual(result, tiny_quantity)
 
 
+class TestComputeScaleInTopup(unittest.TestCase):
+    """compute_scale_in_topup() -- the sizing decision for a scout position's
+    momentum-confirmed scale-in. Split out of run_cycle's scale-in loop after
+    mining the journal found 383+ cycles with zero logged scale_in actions
+    despite a position (GIKO) already showing scaled_in=True live: the old
+    inline 'too small to bother' branch silently flipped the flag without
+    buying or logging anything. This also covers the related fix -- capping
+    to whatever room fits instead of an all-or-nothing skip -- since exposure
+    has repeatedly sat at/near the cap live."""
+
+    def test_already_full_when_gap_below_min_trade(self):
+        amount, reason = p.compute_scale_in_topup(
+            cost_basis_usd=9.7, full_target_size=10.0, cash_usd=100.0,
+            exposure_room_usd=100.0, min_trade_usd=1.0)
+        self.assertEqual(amount, 0.0)
+        self.assertEqual(reason, "already_full")
+
+    def test_full_topup_when_room_is_ample(self):
+        amount, reason = p.compute_scale_in_topup(
+            cost_basis_usd=2.0, full_target_size=10.0, cash_usd=100.0,
+            exposure_room_usd=100.0, min_trade_usd=1.0)
+        self.assertIsNone(reason)
+        self.assertAlmostEqual(amount, 8.0)
+
+    def test_capped_by_exposure_room_partial_topup(self):
+        # wants $8 more but only $3 of exposure room remains -- should top up
+        # by exactly the $3 that fits rather than skip entirely
+        amount, reason = p.compute_scale_in_topup(
+            cost_basis_usd=2.0, full_target_size=10.0, cash_usd=100.0,
+            exposure_room_usd=3.0, min_trade_usd=1.0)
+        self.assertIsNone(reason)
+        self.assertAlmostEqual(amount, 3.0)
+
+    def test_capped_by_cash_partial_topup(self):
+        amount, reason = p.compute_scale_in_topup(
+            cost_basis_usd=2.0, full_target_size=10.0, cash_usd=2.5,
+            exposure_room_usd=100.0, min_trade_usd=1.0)
+        self.assertIsNone(reason)
+        self.assertAlmostEqual(amount, 2.5)
+
+    def test_insufficient_room_when_capped_amount_below_min_trade(self):
+        amount, reason = p.compute_scale_in_topup(
+            cost_basis_usd=2.0, full_target_size=10.0, cash_usd=100.0,
+            exposure_room_usd=0.50, min_trade_usd=1.0)
+        self.assertEqual(amount, 0.0)
+        self.assertEqual(reason, "insufficient_room")
+
+    def test_negative_exposure_room_treated_as_zero_not_negative(self):
+        # exposure already over the cap -- should behave like zero room
+        # available, not go negative and pass some nonsensical min() result
+        amount, reason = p.compute_scale_in_topup(
+            cost_basis_usd=2.0, full_target_size=10.0, cash_usd=100.0,
+            exposure_room_usd=-5.0, min_trade_usd=1.0)
+        self.assertEqual(amount, 0.0)
+        self.assertEqual(reason, "insufficient_room")
+
+
 class TestMemecoinExposureUsd(unittest.TestCase):
     """memecoin_exposure_usd() sums scout+emerging tier value -- what
     max_memecoin_exposure_fraction caps ('risk a maximum of 5% of total
