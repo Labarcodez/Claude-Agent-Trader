@@ -28,10 +28,17 @@ def make_size_args(**overrides):
 
 class TestTierMultipliers(unittest.TestCase):
     def test_matches_config_discovery_yaml(self):
-        # config/discovery.yaml's tiers block is the source of truth for these
-        # numbers; this test exists so a change to one doesn't silently drift
-        # from the other.
-        self.assertEqual(p.TIER_MULTIPLIERS, {"blue_chip": 1.0, "established": 0.7, "emerging": 0.4})
+        # config/discovery.yaml's tiers block is the source of truth for
+        # these three; this test exists so a change to one doesn't silently
+        # drift from the other. "scout" is deliberately NOT in
+        # config/discovery.yaml -- it's a paper-trading-only experimental
+        # tier (see scout_disco_args()'s docstring), so it's excluded here
+        # rather than asserted against a config block it isn't sourced from.
+        live_tiers = {k: v for k, v in p.TIER_MULTIPLIERS.items() if k != "scout"}
+        self.assertEqual(live_tiers, {"blue_chip": 1.0, "established": 0.7, "emerging": 0.4})
+
+    def test_scout_tier_exists_for_the_experimental_pathway(self):
+        self.assertIn("scout", p.TIER_MULTIPLIERS)
 
 
 class TestPortfolioValueUsd(unittest.TestCase):
@@ -101,6 +108,94 @@ class TestPortfolioHeatPct(unittest.TestCase):
         # portfolio value = 20, heat_usd = (10*0.1)+(10*0.1) = 2, heat = 2/20 = 0.10
         heat = p.portfolio_heat_pct(state, prices, stop_loss_pct=0.10)
         self.assertAlmostEqual(heat, 0.10, places=6)
+
+
+class TestComputePartialProfitTake(unittest.TestCase):
+    """compute_partial_profit_take() implements 'sell 100% of initial
+    investment after a 2x-3x gain, let the remainder ride' -- scout tier's
+    tiered profit-taking rule."""
+
+    def test_none_below_the_multiple(self):
+        # $10 cost basis, 100 tokens, price $0.15 -> value $15 = 1.5x, below a 2.5x trigger
+        self.assertIsNone(p.compute_partial_profit_take(10.0, 100.0, 0.15, profit_take_multiple=2.5))
+
+    def test_none_with_zero_or_negative_cost_basis(self):
+        # already taken (cost_basis reset to 0), or a pre-existing position with no tracked cost basis
+        self.assertIsNone(p.compute_partial_profit_take(0.0, 100.0, 1.0, profit_take_multiple=2.5))
+
+    def test_triggers_at_exactly_the_multiple(self):
+        # $10 cost basis, price such that value = exactly 2.5x = $25
+        result = p.compute_partial_profit_take(10.0, 100.0, price=0.25, profit_take_multiple=2.5)
+        self.assertIsNotNone(result)
+
+    def test_sells_exactly_enough_to_recoup_cost_basis(self):
+        # $10 cost basis, 100 tokens, price $0.30 (value $30 = 3x) -> should sell
+        # cost_basis/price = 10/0.30 = 33.33 tokens to recoup exactly $10
+        quantity = p.compute_partial_profit_take(10.0, 100.0, price=0.30, profit_take_multiple=2.5)
+        self.assertAlmostEqual(quantity, 10.0 / 0.30, places=6)
+        self.assertAlmostEqual(quantity * 0.30, 10.0, places=6)  # proceeds == cost basis, by construction
+
+    def test_never_sells_more_than_held(self):
+        # a huge price move means cost_basis/price would be tiny -- but confirm
+        # the cap holds even in a contrived case where it wouldn't naturally
+        tiny_quantity = 0.001
+        result = p.compute_partial_profit_take(10.0, tiny_quantity, price=100_000.0, profit_take_multiple=2.5)
+        self.assertLessEqual(result, tiny_quantity)
+
+
+class TestMemecoinExposureUsd(unittest.TestCase):
+    """memecoin_exposure_usd() sums scout+emerging tier value -- what
+    max_memecoin_exposure_fraction caps ('risk a maximum of 5% of total
+    portfolio on memecoins')."""
+
+    def test_zero_with_no_positions(self):
+        state = {"positions": {}}
+        self.assertEqual(p.memecoin_exposure_usd(state, {}), 0.0)
+
+    def test_includes_scout_and_emerging_only(self):
+        state = {"positions": {
+            "SCOUT1": {"quantity": 10.0, "tier": "scout"},
+            "EMERGE1": {"quantity": 5.0, "tier": "emerging"},
+            "BLUE1": {"quantity": 1.0, "tier": "blue_chip"},
+            "ESTAB1": {"quantity": 2.0, "tier": "established"},
+        }}
+        prices = {"SCOUT1": 1.0, "EMERGE1": 2.0, "BLUE1": 100.0, "ESTAB1": 50.0}
+        # scout: 10*1=10, emerging: 5*2=10 -> 20 total, blue_chip/established excluded
+        self.assertEqual(p.memecoin_exposure_usd(state, prices), 20.0)
+
+    def test_excludes_unpriced_positions_rather_than_erroring(self):
+        state = {"positions": {"SCOUT1": {"quantity": 10.0, "tier": "scout"}}}
+        self.assertEqual(p.memecoin_exposure_usd(state, {}), 0.0)
+
+
+class TestScoutDiscoArgs(unittest.TestCase):
+    """scout_disco_args() loosens maturity/liquidity/distribution thresholds
+    for very-new tokens, but must NOT loosen the hard anti-rug checks --
+    those (not age or liquidity) are what actually prevent a malicious
+    mint from draining a pool."""
+
+    def _base_args(self):
+        return argparse.Namespace(
+            request_delay=0.4,
+            min_liquidity_usd=250_000, min_holder_count=500, min_organic_score=40, min_pool_age_hours=72,
+            max_top_holder_pct=22.0,
+            blue_chip_mcap_usd=50_000_000, blue_chip_holder_count=10_000,
+            established_mcap_usd=5_000_000, established_holder_count=2_000,
+            scout_min_liquidity_usd=20_000, scout_min_holder_count=30, scout_min_organic_score=20,
+            scout_min_pool_age_hours=1, scout_max_top_holder_pct=35.0,
+        )
+
+    def test_thresholds_are_looser_than_normal(self):
+        scout = p.scout_disco_args(self._base_args())
+        self.assertLess(scout.min_liquidity_usd, 250_000)
+        self.assertLess(scout.min_holder_count, 500)
+        self.assertLess(scout.min_pool_age_hours, 72)
+        self.assertGreater(scout.max_top_holder_pct, 22.0)
+
+    def test_hard_anti_rug_checks_are_unchanged(self):
+        scout = p.scout_disco_args(self._base_args())
+        self.assertTrue(scout.require_mint_renounced)
+        self.assertTrue(scout.require_freeze_renounced)
 
 
 class TestSizePosition(unittest.TestCase):

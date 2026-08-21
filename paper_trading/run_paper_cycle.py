@@ -30,6 +30,21 @@ Simplifications vs. the live trade-cycle skill (documented, not hidden):
     reusing the exact same code (backtest/strategies.py, research/discover_candidates.py)
     the live skill is documented to use.
 
+Scout tier (PAPER-TRADING EXPERIMENTAL, see scout_disco_args()): a second,
+looser discovery pass for tokens too new/illiquid to pass the normal
+thresholds, entered small (--scout-position-fraction, default 20% of the
+tier-target size) and scaled to full size only if price rises
+--scale-in-price-threshold-pct from entry ("price action confirms
+momentum" -- volume confirmation isn't implemented, no reliable live volume
+signal exists in this pipeline once a position is open). Sells enough to
+recoup 100% of cost basis once value reaches --profit-take-multiple (default
+2.5x), letting the remainder ride with zero capital still at risk. Capped in
+aggregate by --max-memecoin-exposure-fraction (default 5% of portfolio,
+scout+emerging combined). Does NOT touch config/discovery.yaml or
+config/risk.yaml -- those stay the real safety boundary for anything live
+(CLAUDE.md rule 7); this is how a strategy like this gets a real paper track
+record before that conversation ever happens. Disable with --disable-scout-tier.
+
 Usage:
     python3 paper_trading/run_paper_cycle.py
     python3 paper_trading/run_paper_cycle.py --reset       # wipe paper state, restart at starting capital
@@ -84,7 +99,8 @@ MAX_FRESH_PRICE_HISTORY_FETCHES_PER_CYCLE = 5  # discovery now rotates through a
                                                  # genuinely bad CoinGecko stretch. Deferred candidates are
                                                  # simply reconsidered next cycle, no correctness loss.
 
-TIER_MULTIPLIERS = {"blue_chip": 1.0, "established": 0.7, "emerging": 0.4}
+TIER_MULTIPLIERS = {"blue_chip": 1.0, "established": 0.7, "emerging": 0.4, "scout": 0.4}
+MEMECOIN_TIERS = {"scout", "emerging"}  # what counts toward max_memecoin_exposure_fraction
 
 
 # ---- State ------------------------------------------------------------------
@@ -403,6 +419,25 @@ def size_position(tier: str, portfolio_value: float, closes: list[float] | None,
     return base * mult
 
 
+def compute_partial_profit_take(cost_basis_usd: float, quantity: float, price: float,
+                                 profit_take_multiple: float) -> float | None:
+    """Returns the quantity to sell to recoup exactly cost_basis_usd once the
+    position's current value reaches profit_take_multiple x cost_basis_usd,
+    or None if not triggered (or there's no cost basis left to recoup --
+    already taken, or a pre-existing position with no tracked cost basis).
+    Selling exactly enough to recoup the original stake turns the remaining
+    quantity into a risk-free "let it ride" runner: even if it goes to zero
+    from here, the original investment is already banked. This is the
+    "sell 100% of initial investment after a 2x-3x gain" rule -- applied to
+    scout-tier positions only (see run_cycle's exit-management loop)."""
+    if cost_basis_usd <= 0:
+        return None
+    current_value = quantity * price
+    if current_value < cost_basis_usd * profit_take_multiple:
+        return None
+    return min(cost_basis_usd / price, quantity)  # never sell more than we hold
+
+
 def portfolio_heat_pct(state: dict, prices: dict[str, float], stop_loss_pct: float) -> float:
     value = portfolio_value_usd(state, prices)
     if value <= 0:
@@ -440,14 +475,27 @@ def run_cycle(args):
                                             held_mints=set(state["positions"]))
     eligible: dict[str, dict] = {}
     rejected_count = 0
+    scout_count = 0
     for mint in mints:
         result = disco.evaluate_candidate(mint, candidates[mint], disco_args(args))
         if result["eligible"]:
             eligible[mint] = result
-        else:
-            rejected_count += 1
+            continue
+        # Failed the normal (established-token-shaped) thresholds -- try the
+        # looser scout thresholds before giving up on it. Only worth the
+        # extra evaluation for candidates that didn't already qualify
+        # normally; a normal-eligible candidate is never re-checked as scout.
+        if args.enable_scout_tier:
+            scout_result = disco.evaluate_candidate(mint, candidates[mint], scout_disco_args(args))
+            if scout_result["eligible"]:
+                scout_result["tier"] = "scout"
+                eligible[mint] = scout_result
+                scout_count += 1
+                continue
+        rejected_count += 1
     _save_recently_evaluated(mints, args.max_candidates)
-    print(f"Discovery: {len(candidates)} found, {len(mints)} evaluated, {len(eligible)} eligible, {rejected_count} rejected.")
+    print(f"Discovery: {len(candidates)} found, {len(mints)} evaluated, {len(eligible)} eligible "
+          f"({scout_count} scout-tier), {rejected_count} rejected.")
 
     # include existing paper positions even if they fell out of discovery this cycle
     tracked_mints = set(eligible) | set(state["positions"])
@@ -514,12 +562,41 @@ def run_cycle(args):
         if price is None:
             continue
         pos["peak_price_usd"] = max(pos.get("peak_price_usd", pos["entry_price_usd"]), price)
+
+        # Partial profit-take (scout tier only): "sell 100% of initial
+        # investment after a 2x-3x gain, let the remainder ride." Checked
+        # before the full-exit logic below, and skips it for this cycle if it
+        # fires -- a partial sell isn't a full exit, and re-evaluating a full
+        # stop-loss/take-profit against the just-reduced position in the same
+        # pass would use stale peak/ret bookkeeping from before the trim.
+        if pos.get("tier") == "scout" and not pos.get("profit_taken"):
+            sell_qty = compute_partial_profit_take(pos.get("cost_basis_usd", 0.0), pos["quantity"], price,
+                                                     args.profit_take_multiple)
+            if sell_qty is not None:
+                proceeds = sell_qty * price * (1 - args.fee_bps / 10_000 - args.slippage_bps / 10_000)
+                state["cash_usd"] += proceeds
+                pos["quantity"] -= sell_qty
+                pos["cost_basis_usd"] = 0.0  # fully recouped -- the remainder is risk-free from here
+                pos["profit_taken"] = True
+                actions.append({"type": "partial_sell", "symbol": pos["symbol"], "mint": mint,
+                                 "reason": f"profit-take ({args.profit_take_multiple:.1f}x cost basis)",
+                                 "quantity_sold": sell_qty, "proceeds_usd": proceeds,
+                                 "remaining_quantity": pos["quantity"]})
+                continue
+
         ret = (price / pos["entry_price_usd"]) - 1
         drawdown_from_peak = (price / pos["peak_price_usd"]) - 1
+        # Scout tier skips the blanket take_profit_pct exit (35% by default)
+        # -- the whole point of the tiered strategy is letting a scout
+        # position run to a 2x-3x gain via the partial profit-take above
+        # instead of the full position closing out at +35%. Stop-loss and
+        # trailing-stop still protect it normally, including on whatever
+        # remains after a partial take.
+        take_profit_threshold = None if pos.get("tier") == "scout" else args.take_profit_pct
         exit_reason = None
         if ret <= -args.stop_loss_pct:
             exit_reason = f"stop-loss ({ret:+.1%})"
-        elif ret >= args.take_profit_pct:
+        elif take_profit_threshold is not None and ret >= take_profit_threshold:
             exit_reason = f"take-profit ({ret:+.1%})"
         elif ret > 0 and drawdown_from_peak <= -args.trailing_stop_pct:
             exit_reason = f"trailing-stop ({drawdown_from_peak:+.1%} from peak)"
@@ -539,6 +616,56 @@ def run_cycle(args):
             del state["positions"][mint]
             sold_this_cycle.add(mint)
 
+    # ---- scale in confirmed scout positions ----
+    # "adding funds only if volume and price action confirm momentum": once a
+    # scout position is up scale_in_price_threshold_pct from its (blended)
+    # entry, top it up from the initial scout_position_fraction stake to the
+    # full tier-target size, subject to the same risk caps (cash, aggregate
+    # memecoin exposure, portfolio heat) as any new entry. Volume
+    # confirmation is a documented simplification, not a silent gap: this
+    # pipeline has no reliable live volume signal to check once a position is
+    # already open (Jupiter's search endpoint used for pricing doesn't return
+    # it), so price action alone is the real trigger here. Gated on
+    # allow_new_entries like any other addition of fresh capital at risk --
+    # the regime filter existing to block *new* risk during risk-off applies
+    # to growing a position's exposure too, not just opening a brand new one.
+    if allow_new_entries:
+        for mint, pos in list(state["positions"].items()):
+            if pos.get("tier") != "scout" or pos.get("scaled_in") or pos.get("profit_taken"):
+                continue
+            price = prices.get(mint)
+            if price is None:
+                continue
+            if price < pos["entry_price_usd"] * (1 + args.scale_in_price_threshold_pct):
+                continue
+            closes = get_price_history_closes(mint, args.history_days)
+            full_target_size = size_position("scout", port_value, closes, args)
+            additional_needed = full_target_size - pos.get("cost_basis_usd", 0.0)
+            if additional_needed < args.min_trade_usd:
+                pos["scaled_in"] = True  # already close enough to full size, or too small a top-up to bother
+                continue
+            additional_needed = min(additional_needed, state["cash_usd"])
+            if additional_needed < args.min_trade_usd:
+                continue  # can't afford a meaningful top-up right now -- retry next cycle, don't mark scaled_in
+            if memecoin_exposure_usd(state, prices) + additional_needed > args.max_memecoin_exposure_fraction * port_value:
+                continue  # would breach the aggregate memecoin cap -- retry next cycle if room opens up
+            projected_heat = (portfolio_heat_pct(state, prices, args.stop_loss_pct)
+                               + (additional_needed * args.stop_loss_pct / port_value if port_value else 0))
+            if projected_heat > args.max_portfolio_heat_pct:
+                continue
+            fill_price = price * (1 + args.slippage_bps / 10_000)
+            added_quantity = (additional_needed * (1 - args.fee_bps / 10_000)) / fill_price
+            state["cash_usd"] -= additional_needed
+            total_quantity = pos["quantity"] + added_quantity
+            total_cost = pos.get("cost_basis_usd", 0.0) + additional_needed
+            pos["entry_price_usd"] = total_cost / total_quantity  # blended avg cost -- ret/stop-loss/take-profit all key off this
+            pos["quantity"] = total_quantity
+            pos["cost_basis_usd"] = total_cost
+            pos["scaled_in"] = True
+            actions.append({"type": "scale_in", "symbol": pos["symbol"], "mint": mint,
+                             "size_usd": additional_needed, "fill_price": fill_price,
+                             "reason": f"price confirmed momentum (+{args.scale_in_price_threshold_pct:.0%} from scout entry)"})
+
     # ---- consider new entries ----
     # not_traded records why each eligible candidate that WASN'T bought this
     # cycle was skipped -- without this, the journal only ever shows the
@@ -553,6 +680,7 @@ def run_cycle(args):
     if allow_new_entries:
         open_slots = args.max_concurrent_positions - len(state["positions"])
         emerging_open = sum(1 for p in state["positions"].values() if p.get("tier") == "emerging")
+        scout_open = sum(1 for p in state["positions"].values() if p.get("tier") == "scout")
         # Discovery now rotates through a ~2,600-token pool (see
         # select_candidates_for_rotation()), so most eligible candidates each
         # cycle are ones never seen before -- a price_history_cache miss,
@@ -586,6 +714,9 @@ def run_cycle(args):
             if tier == "emerging" and emerging_open >= args.max_emerging_tier_positions:
                 not_traded[mint] = f"emerging-tier cap reached (max_emerging_tier_positions={args.max_emerging_tier_positions})"
                 continue
+            if tier == "scout" and scout_open >= args.max_scout_positions:
+                not_traded[mint] = f"scout-tier cap reached (max_scout_positions={args.max_scout_positions})"
+                continue
             cached_closes = _load_price_history_cache(mint, args.history_days)
             if cached_closes is None and fresh_fetches_this_cycle >= MAX_FRESH_PRICE_HISTORY_FETCHES_PER_CYCLE:
                 not_traded[mint] = (f"deferred to a future cycle (hit MAX_FRESH_PRICE_HISTORY_FETCHES_PER_CYCLE="
@@ -601,12 +732,38 @@ def run_cycle(args):
                 not_traded[mint] = f"strategy signal was '{signal}', not buy"
                 continue  # only trade no-history tokens opportunistically-small; require an actual buy signal when history exists
             size_usd = size_position(tier, port_value, closes, args)
-            if size_usd < args.min_trade_usd:
-                not_traded[mint] = f"sized position ${size_usd:.2f} below min_trade_usd (${args.min_trade_usd:.2f})"
+            is_scout = tier == "scout"
+            if is_scout:
+                # Initial scout entry is deliberately tiny (default 20% of
+                # the tier-target size) -- "starting with a small initial
+                # scout position, adding funds only if price action confirms
+                # momentum" (see the scale-in loop above). Uses its own,
+                # lower min-trade floor: a full-size scout stake on a small
+                # paper portfolio can land under the normal $5 min_trade_usd
+                # (e.g. ~$1-2), which would make every scout entry
+                # unconditionally too small to trade under the normal floor.
+                size_usd *= args.scout_position_fraction
+                min_trade_floor = args.scout_min_trade_usd
+            else:
+                min_trade_floor = args.min_trade_usd
+            if size_usd < min_trade_floor:
+                not_traded[mint] = f"sized position ${size_usd:.2f} below min trade floor (${min_trade_floor:.2f})"
                 continue
             if size_usd > state["cash_usd"]:
                 not_traded[mint] = f"sized position ${size_usd:.2f} exceeds available cash (${state['cash_usd']:.2f})"
                 continue
+            if tier in MEMECOIN_TIERS:
+                # "Risk a maximum of X% of total portfolio on memecoins" --
+                # aggregate cap across scout + emerging tiers combined,
+                # independent of (and in addition to) the per-tier position
+                # COUNT caps above, which don't bound total dollar exposure
+                # on their own.
+                current_exposure = memecoin_exposure_usd(state, prices)
+                if current_exposure + size_usd > args.max_memecoin_exposure_fraction * port_value:
+                    not_traded[mint] = (f"would exceed max_memecoin_exposure_fraction "
+                                         f"(${current_exposure + size_usd:.2f} > "
+                                         f"{args.max_memecoin_exposure_fraction:.0%} of ${port_value:.2f} portfolio)")
+                    continue
             projected_heat = portfolio_heat_pct(state, prices, args.stop_loss_pct) + (size_usd * args.stop_loss_pct / port_value if port_value else 0)
             if projected_heat > args.max_portfolio_heat_pct:
                 not_traded[mint] = f"would exceed max_portfolio_heat_pct ({projected_heat:.1%} > {args.max_portfolio_heat_pct:.1%})"
@@ -617,6 +774,7 @@ def run_cycle(args):
             state["positions"][mint] = {
                 "symbol": result["symbol"], "quantity": quantity, "entry_price_usd": fill_price,
                 "entry_time": cycle_start.isoformat(), "tier": tier, "peak_price_usd": fill_price,
+                "cost_basis_usd": size_usd, "scaled_in": not is_scout, "profit_taken": False,
             }
             actions.append({"type": "buy", "symbol": result["symbol"], "mint": mint, "tier": tier,
                              "size_usd": size_usd, "fill_price": fill_price,
@@ -624,6 +782,8 @@ def run_cycle(args):
             open_slots -= 1
             if tier == "emerging":
                 emerging_open += 1
+            elif tier == "scout":
+                scout_open += 1
 
     final_prices = dict(prices)
     missing = [mint for mint in state["positions"] if mint not in final_prices]
@@ -659,9 +819,14 @@ def run_cycle(args):
     print(f"\nActions this cycle: {len(actions)}")
     for a in actions:
         if a["type"] == "buy":
-            print(f"  BUY  {a['symbol']:>10}  ${a['size_usd']:.2f}  tier={a['tier']:<10}  ({a['signal_basis']})")
+            print(f"  BUY       {a['symbol']:>10}  ${a['size_usd']:.2f}  tier={a['tier']:<10}  ({a['signal_basis']})")
+        elif a["type"] == "scale_in":
+            print(f"  SCALE-IN  {a['symbol']:>10}  +${a['size_usd']:.2f}  ({a['reason']})")
+        elif a["type"] == "partial_sell":
+            print(f"  TAKE-PART {a['symbol']:>10}  sold {a['quantity_sold']:.4g} (${a['proceeds_usd']:.2f})  "
+                  f"{a['reason']}, {a['remaining_quantity']:.4g} riding free")
         else:
-            print(f"  SELL {a['symbol']:>10}  {a['reason']}  return={a['return_pct']:+.1f}%")
+            print(f"  SELL      {a['symbol']:>10}  {a['reason']}  return={a['return_pct']:+.1f}%")
     if not_traded:
         print(f"\nEligible but not traded ({len(not_traded)}):")
         for mint, reason in not_traded.items():
@@ -694,6 +859,46 @@ def disco_args(args) -> argparse.Namespace:
     )
 
 
+def scout_disco_args(args) -> argparse.Namespace:
+    """A second, deliberately looser threshold set for very-new/low-liquidity
+    tokens the normal thresholds structurally can't pass -- min_pool_age_hours
+    (72h) and min_liquidity_usd ($250k) both assume an already-established
+    token, so a genuinely new one fails on age/liquidity alone regardless of
+    fundamentals. PAPER-TRADING EXPERIMENTAL ONLY: this does not touch
+    config/discovery.yaml or research/discover_candidates.py's own CLI
+    defaults, which stay the real safety boundary for anything live (see
+    CLAUDE.md rule 7) -- this is a controlled way to build a real paper track
+    record on "scout" tier before ever considering loosening anything live.
+
+    The hard anti-rug checks are UNCHANGED from disco_args(): mint/freeze
+    authority must still be renounced and RugCheck must still confirm the
+    mint isn't a known rug -- those are what actually prevent "the dev drains
+    the pool," not age or liquidity depth. Only the maturity/liquidity/
+    distribution dimensions are loosened, and only somewhat -- a brand-new
+    token concentrated in a few wallets is normal for its first hours, not
+    itself proof of malice, but max_top_holder_pct is still capped well
+    below "one wallet owns most of the supply.\""""
+    base = disco_args(args)
+    base.min_liquidity_usd = args.scout_min_liquidity_usd
+    base.min_holder_count = args.scout_min_holder_count
+    base.min_organic_score = args.scout_min_organic_score
+    base.min_pool_age_hours = args.scout_min_pool_age_hours
+    base.max_top_holder_pct = args.scout_max_top_holder_pct
+    return base
+
+
+def memecoin_exposure_usd(state: dict, prices: dict[str, float]) -> float:
+    """Mark-to-market value of every open position in MEMECOIN_TIERS (scout +
+    emerging) -- what max_memecoin_exposure_fraction actually caps."""
+    total = 0.0
+    for mint, pos in state["positions"].items():
+        if pos.get("tier") in MEMECOIN_TIERS:
+            price = prices.get(mint)
+            if price is not None:
+                total += pos["quantity"] * price
+    return total
+
+
 def main():
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--reset", action="store_true", help="Wipe paper state and restart at --starting-capital-usd")
@@ -711,7 +916,12 @@ def main():
     ap.add_argument("--max-position-fraction", dest="max_position_fraction", type=float, default=0.30)
     ap.add_argument("--max-position-usd", dest="max_position_usd", type=float, default=20.0)
     ap.add_argument("--min-trade-usd", dest="min_trade_usd", type=float, default=5.0)
-    ap.add_argument("--max-concurrent-positions", dest="max_concurrent_positions", type=int, default=3)
+    ap.add_argument("--max-concurrent-positions", dest="max_concurrent_positions", type=int, default=6,
+                     help="Was 3 -- raised so the scout tier has room to actually operate: scout entries are "
+                          "$1-2 each (scout_position_fraction of an already-small tier size), so more concurrent "
+                          "slots barely moves total dollar risk, but the old cap of 3 was fully consumed by "
+                          "blue_chip/established/emerging positions alone, locking scout out entirely (verified "
+                          "live: 3 scout-tier candidates found, all rejected with 'no open slots').")
     ap.add_argument("--max-emerging-tier-positions", dest="max_emerging_tier_positions", type=int, default=2)
     ap.add_argument("--target-daily-volatility-pct", dest="target_daily_volatility_pct", type=float, default=3.0)
     ap.add_argument("--volatility-size-min-mult", dest="volatility_size_min_mult", type=float, default=0.5)
@@ -736,6 +946,50 @@ def main():
     ap.add_argument("--blue-chip-holder-count", dest="blue_chip_holder_count", type=int, default=10_000)
     ap.add_argument("--established-mcap-usd", dest="established_mcap_usd", type=float, default=5_000_000)
     ap.add_argument("--established-holder-count", dest="established_holder_count", type=int, default=2_000)
+    # ---- Scout tier: tiered entry into very-new/low-liquidity tokens ------------
+    # PAPER-TRADING EXPERIMENTAL. Does not touch config/discovery.yaml or
+    # config/risk.yaml -- see scout_disco_args()'s docstring. "Scout" tokens
+    # fail the normal min-pool-age/min-liquidity thresholds (which assume an
+    # already-established token) but still pass every hard anti-rug check
+    # (mint/freeze authority renounced, RugCheck not-rugged). Sized tiny
+    # (scout-position-fraction of the tier target), scaled up only if price
+    # confirms momentum, and capped in aggregate by max-memecoin-exposure-fraction.
+    ap.add_argument("--enable-scout-tier", dest="enable_scout_tier", action="store_true", default=True)
+    ap.add_argument("--disable-scout-tier", dest="enable_scout_tier", action="store_false")
+    ap.add_argument("--scout-min-liquidity-usd", dest="scout_min_liquidity_usd", type=float, default=20_000,
+                     help="vs. min_liquidity_usd's $250k -- a real new pool can be legitimate with far less depth")
+    ap.add_argument("--scout-min-holder-count", dest="scout_min_holder_count", type=int, default=30,
+                     help="vs. min_holder_count's 500 -- a token a few hours old hasn't had time to accumulate holders")
+    ap.add_argument("--scout-min-organic-score", dest="scout_min_organic_score", type=float, default=20,
+                     help="vs. min_organic_score's 40 -- still required (missing organicScore still hard-rejects, "
+                          "same wash-trading defense as the normal tier), just a lower bar")
+    ap.add_argument("--scout-min-pool-age-hours", dest="scout_min_pool_age_hours", type=float, default=1,
+                     help="vs. min_pool_age_hours's 72 -- still excludes the first hour (the single highest-risk "
+                          "rug window), the whole point of this tier is reaching tokens that are genuinely new")
+    ap.add_argument("--scout-max-top-holder-pct", dest="scout_max_top_holder_pct", type=float, default=35.0,
+                     help="vs. max_top_holder_pct's 22%% -- early concentration is normal for a token's first "
+                          "hours, not on its own proof of malice, but still capped well below 'one wallet owns "
+                          "most of the supply'")
+    ap.add_argument("--scout-position-fraction", dest="scout_position_fraction", type=float, default=0.20,
+                     help="initial scout entry = this fraction of the tier-target size ('starting with a small "
+                          "initial scout position')")
+    ap.add_argument("--scout-min-trade-usd", dest="scout_min_trade_usd", type=float, default=1.0,
+                     help="separate, lower floor than --min-trade-usd -- a full scout-tier target size on a small "
+                          "paper portfolio, times scout_position_fraction, is often ~$1-2")
+    ap.add_argument("--scale-in-price-threshold-pct", dest="scale_in_price_threshold_pct", type=float, default=0.15,
+                     help="price up this much from scout entry = 'price action confirms momentum' -> top up to "
+                          "the full tier-target size")
+    ap.add_argument("--profit-take-multiple", dest="profit_take_multiple", type=float, default=2.5,
+                     help="sell enough to recoup 100%% of cost basis once position value reaches this multiple of "
+                          "cost basis ('2x to 3x gain') -- the remainder rides with zero capital still at risk")
+    ap.add_argument("--max-scout-positions", dest="max_scout_positions", type=int, default=5,
+                     help="separate count cap from --max-emerging-tier-positions -- scout sizes are much smaller "
+                          "individually, so more concurrent slots still keeps aggregate exposure bounded by "
+                          "--max-memecoin-exposure-fraction")
+    ap.add_argument("--max-memecoin-exposure-fraction", dest="max_memecoin_exposure_fraction", type=float, default=0.05,
+                     help="aggregate cap on scout+emerging tier value as a fraction of total portfolio value "
+                          "('risk a maximum of 5%% of total portfolio on memecoins') -- independent of the "
+                          "per-tier position COUNT caps, which don't bound total dollar exposure on their own")
     args = ap.parse_args()
     run_cycle(args)
 
