@@ -38,6 +38,7 @@ Usage:
 from __future__ import annotations
 import argparse
 import json
+import random
 import sys
 import time
 from datetime import datetime, timezone
@@ -163,14 +164,28 @@ def select_candidates_for_rotation(all_mints: list[str], max_candidates: int, re
     silently fall out of consideration for a strategy-driven exit just
     because rotation deprioritized it (config/discovery.yaml's
     pinned_candidates documents this exact intent for open positions).
-    Among the rest, mints NOT in recently_evaluated go first, so the cap's
-    slots rotate across the full discovered set over multiple cycles instead
-    of always going to whichever tokens happen to sort first."""
+
+    Among the rest, mints NOT in recently_evaluated go first -- but shuffled,
+    not taken in gather_candidates()'s fixed source order. Without the
+    shuffle, this silently reproduced the exact bug it was built to fix:
+    gather_candidates() lists momentum sources (organic/trending/traded/
+    recent, ~70-130 tokens combined) before the verified-tag source
+    (~2,561 tokens). That small momentum pool cycles fast enough to supply
+    max_candidates' worth of "unseen" tokens on its own almost every cycle,
+    so the selection never had to reach past index ~130 -- verified live: 43
+    selected candidates in one real cycle, every single one from position
+    0-126 of a 2,596-token pool. The 2,561-token verified tail was
+    "discovered" but never actually evaluated, cycle after cycle. Shuffling
+    unseen (and seen, for the fallback case) means every mint in the pool
+    gets a fair chance at a slot regardless of which source found it or
+    where gather_candidates() happened to place it."""
     held_mints = held_mints or set()
     held_in_pool = [m for m in all_mints if m in held_mints]
     rest = [m for m in all_mints if m not in held_mints]
     unseen = [m for m in rest if m not in recently_evaluated]
     seen = [m for m in rest if m in recently_evaluated]
+    random.shuffle(unseen)
+    random.shuffle(seen)
     return held_in_pool + (unseen + seen)[:max_candidates]
 
 

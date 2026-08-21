@@ -182,6 +182,28 @@ class TestSelectCandidatesForRotation(unittest.TestCase):
         result = p.select_candidates_for_rotation(all_mints, max_candidates=10, recently_evaluated=set())
         self.assertEqual(set(result), {"A", "B"})
 
+    def test_selection_is_shuffled_not_biased_toward_the_front_of_all_mints(self):
+        """Real bug this guards against: gather_candidates() lists momentum
+        sources (organic/trending/traded/recent, ~70-130 tokens) before the
+        verified-tag source (~2,561 tokens) -- without shuffling, the small,
+        fast-cycling momentum pool alone always supplied enough "unseen"
+        tokens to fill every slot, so selection never reached past roughly
+        index 130 of a 2,596-token pool, cycle after cycle. Verified live: 43
+        selected candidates in a real cycle, all from position 0-126.
+        Simulates that shape -- a small "front" block plus a huge "tail" --
+        and asserts the tail actually gets picked sometimes, not never."""
+        front = [f"front{i}" for i in range(100)]
+        tail = [f"tail{i}" for i in range(2500)]
+        all_mints = front + tail
+        selected_from_tail_ever = False
+        for _ in range(20):
+            result = p.select_candidates_for_rotation(all_mints, max_candidates=40, recently_evaluated=set())
+            if any(m.startswith("tail") for m in result):
+                selected_from_tail_ever = True
+                break
+        self.assertTrue(selected_from_tail_ever,
+                         "tail (the large, previously-starved pool) was never selected across 20 cycles")
+
 
 class TestDiscoveryRotationPersistence(unittest.TestCase):
     def setUp(self):
