@@ -1005,10 +1005,13 @@ def main():
     ap.add_argument("--profit-take-multiple", dest="profit_take_multiple", type=float, default=2.5,
                      help="sell enough to recoup 100%% of cost basis once position value reaches this multiple of "
                           "cost basis ('2x to 3x gain') -- the remainder rides with zero capital still at risk")
-    ap.add_argument("--max-scout-positions", dest="max_scout_positions", type=int, default=5,
+    ap.add_argument("--max-scout-positions", dest="max_scout_positions", type=int, default=8,
                      help="separate count cap from --max-emerging-tier-positions -- scout sizes are much smaller "
                           "individually, so more concurrent slots still keeps aggregate exposure bounded by "
-                          "--max-memecoin-exposure-fraction")
+                          "--max-memecoin-exposure-fraction. Was 5, raised after it became the binding constraint "
+                          "for 2 cycles running (candidates rejected 'scout-tier cap reached') while dollar "
+                          "exposure had room to spare (verified live: $7.05 of a $12.09 budget) -- same reasoning "
+                          "as --max-concurrent-positions's earlier increase.")
     ap.add_argument("--max-memecoin-exposure-fraction", dest="max_memecoin_exposure_fraction", type=float, default=0.20,
                      help="aggregate cap on scout+emerging tier value as a fraction of total portfolio value. "
                           "Was 0.05 ('risk a maximum of 5%% of total portfolio on memecoins', the original ask) "
