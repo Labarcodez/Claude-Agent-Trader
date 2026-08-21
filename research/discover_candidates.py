@@ -30,6 +30,7 @@ Usage:
 from __future__ import annotations
 import argparse
 import json
+import random
 import sys
 import time
 import urllib.request
@@ -333,8 +334,19 @@ def main():
 
     print("Gathering candidates from Jupiter Tokens API v2...")
     candidates = gather_candidates(args)
-    mints = list(candidates.keys())[: args.max_candidates]
-    print(f"{len(candidates)} unique candidates found (deduped across sources); evaluating top {len(mints)} (--max-candidates).\n")
+    # Shuffle before truncating -- gather_candidates() lists momentum sources
+    # (organic/trending/traded/recent, ~70-130 tokens) before the
+    # verified-tag source (~2,561 tokens); without shuffling first, a small
+    # momentum pool can supply max_candidates' worth of tokens on its own
+    # every run, so this (what trade-cycle actually runs for live decisions)
+    # would never evaluate anything past roughly the first ~130 of a
+    # 2,600-token pool -- see the same fix in
+    # paper_trading/run_paper_cycle.py's select_candidates_for_rotation()
+    # for the live-verified version of this bug.
+    all_mints = list(candidates.keys())
+    random.shuffle(all_mints)
+    mints = all_mints[: args.max_candidates]
+    print(f"{len(candidates)} unique candidates found (deduped across sources); evaluating {len(mints)} (--max-candidates, sampled across the full pool).\n")
 
     eligible, rejected = [], []
     for i, mint in enumerate(mints, 1):

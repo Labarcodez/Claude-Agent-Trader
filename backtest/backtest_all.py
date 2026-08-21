@@ -24,6 +24,7 @@ Usage:
 from __future__ import annotations
 import argparse
 import json
+import random
 import sys
 import time
 from datetime import datetime, timezone
@@ -76,7 +77,16 @@ def discover_eligible(args) -> list[dict]:
         no_organic=False, no_trending=False, no_traded=False, no_recent=False, no_verified=False,
         limit_per_source=args.limit_per_source,
     ))
-    mints = list(candidates.keys())[: args.max_candidates]
+    # Shuffle before truncating -- see the same fix (and its rationale) in
+    # research/discover_candidates.py's main() and
+    # paper_trading/run_paper_cycle.py's select_candidates_for_rotation().
+    # Without it, this always sampled the same momentum-source head of the
+    # pool and never backtested anything from the much larger verified-tag
+    # tail -- an honesty gap for what "backtest everything currently
+    # eligible" actually means.
+    all_mints = list(candidates.keys())
+    random.shuffle(all_mints)
+    mints = all_mints[: args.max_candidates]
     eligible = []
     for mint in mints:
         result = disco.evaluate_candidate(mint, candidates[mint], disco_args(args))
