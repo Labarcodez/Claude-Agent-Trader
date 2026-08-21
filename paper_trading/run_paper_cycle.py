@@ -586,20 +586,33 @@ def run_cycle(args):
 
         ret = (price / pos["entry_price_usd"]) - 1
         drawdown_from_peak = (price / pos["peak_price_usd"]) - 1
-        # Scout tier skips the blanket take_profit_pct exit (35% by default)
-        # -- the whole point of the tiered strategy is letting a scout
-        # position run to a 2x-3x gain via the partial profit-take above
-        # instead of the full position closing out at +35%. Stop-loss and
-        # trailing-stop still protect it normally, including on whatever
-        # remains after a partial take.
-        take_profit_threshold = None if pos.get("tier") == "scout" else args.take_profit_pct
         exit_reason = None
-        if ret <= -args.stop_loss_pct:
-            exit_reason = f"stop-loss ({ret:+.1%})"
-        elif take_profit_threshold is not None and ret >= take_profit_threshold:
-            exit_reason = f"take-profit ({ret:+.1%})"
-        elif ret > 0 and drawdown_from_peak <= -args.trailing_stop_pct:
-            exit_reason = f"trailing-stop ({drawdown_from_peak:+.1%} from peak)"
+        if pos.get("profit_taken"):
+            # "Let the remaining tokens ride for upside potential without
+            # risking your own capital." cost_basis_usd is already 0 -- a
+            # traditional stop-loss measured against the original entry no
+            # longer protects real capital (there's nothing left to lose),
+            # so it no longer applies here. What DOES still make sense is
+            # protecting the accumulated paper gains via a trailing stop
+            # against this runner's own peak -- just a wider one than a
+            # normal position gets, specifically so routine volatility on a
+            # position with nothing left to lose doesn't chop off the exact
+            # upside this whole strategy exists to capture.
+            if drawdown_from_peak <= -args.house_money_trailing_stop_pct:
+                exit_reason = f"house-money trailing-stop ({drawdown_from_peak:+.1%} from peak)"
+        else:
+            # Scout tier skips the blanket take_profit_pct exit (35% by
+            # default) -- the whole point of the tiered strategy is letting
+            # a scout position run to a 2x-3x gain via the partial
+            # profit-take above instead of the full position closing out at
+            # +35% before it ever gets there.
+            take_profit_threshold = None if pos.get("tier") == "scout" else args.take_profit_pct
+            if ret <= -args.stop_loss_pct:
+                exit_reason = f"stop-loss ({ret:+.1%})"
+            elif take_profit_threshold is not None and ret >= take_profit_threshold:
+                exit_reason = f"take-profit ({ret:+.1%})"
+            elif ret > 0 and drawdown_from_peak <= -args.trailing_stop_pct:
+                exit_reason = f"trailing-stop ({drawdown_from_peak:+.1%} from peak)"
         if exit_reason is None and mint in eligible:
             closes = get_price_history_closes(mint, args.history_days)
             if closes and compute_signal(closes) == "sell":
@@ -930,6 +943,11 @@ def main():
     ap.add_argument("--stop-loss-pct", dest="stop_loss_pct", type=float, default=0.15)
     ap.add_argument("--take-profit-pct", dest="take_profit_pct", type=float, default=0.35)
     ap.add_argument("--trailing-stop-pct", dest="trailing_stop_pct", type=float, default=0.12)
+    ap.add_argument("--house-money-trailing-stop-pct", dest="house_money_trailing_stop_pct", type=float, default=0.30,
+                     help="Wider than --trailing-stop-pct -- applies only after a scout position's profit-take "
+                          "fires (cost basis already recouped, nothing left to lose), replacing the normal "
+                          "stop-loss/take-profit entirely so 'let it ride for upside potential' actually gets "
+                          "room to run instead of being chopped by routine volatility.")
     ap.add_argument("--circuit-breaker-floor-usd", dest="circuit_breaker_floor_usd", type=float, default=20.0)
     ap.add_argument("--circuit-breaker-daily-loss-pct", dest="circuit_breaker_daily_loss_pct", type=float, default=0.25)
     ap.add_argument("--regime-reference-coin", dest="regime_reference_coin", default="bitcoin")
