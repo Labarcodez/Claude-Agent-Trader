@@ -39,8 +39,10 @@ momentum" -- volume confirmation isn't implemented, no reliable live volume
 signal exists in this pipeline once a position is open). Sells enough to
 recoup 100% of cost basis once value reaches --profit-take-multiple (default
 2.5x), letting the remainder ride with zero capital still at risk. Capped in
-aggregate by --max-memecoin-exposure-fraction (default 5% of portfolio,
-scout+emerging combined). Does NOT touch config/discovery.yaml or
+aggregate by --max-memecoin-exposure-fraction (default 20% of portfolio,
+scout+emerging combined -- was 5% at the user's original request, raised
+after a single pre-existing emerging position alone exceeded that budget
+and blocked every scout entry indefinitely). Does NOT touch config/discovery.yaml or
 config/risk.yaml -- those stay the real safety boundary for anything live
 (CLAUDE.md rule 7); this is how a strategy like this gets a real paper track
 record before that conversation ever happens. Disable with --disable-scout-tier.
@@ -1004,10 +1006,13 @@ def main():
                      help="separate count cap from --max-emerging-tier-positions -- scout sizes are much smaller "
                           "individually, so more concurrent slots still keeps aggregate exposure bounded by "
                           "--max-memecoin-exposure-fraction")
-    ap.add_argument("--max-memecoin-exposure-fraction", dest="max_memecoin_exposure_fraction", type=float, default=0.05,
-                     help="aggregate cap on scout+emerging tier value as a fraction of total portfolio value "
-                          "('risk a maximum of 5%% of total portfolio on memecoins') -- independent of the "
-                          "per-tier position COUNT caps, which don't bound total dollar exposure on their own")
+    ap.add_argument("--max-memecoin-exposure-fraction", dest="max_memecoin_exposure_fraction", type=float, default=0.20,
+                     help="aggregate cap on scout+emerging tier value as a fraction of total portfolio value. "
+                          "Was 0.05 ('risk a maximum of 5%% of total portfolio on memecoins', the original ask) "
+                          "-- raised to 0.20 by explicit request after a single pre-existing emerging position "
+                          "(BULLSHIT, $6.45, ~11.5%% of portfolio, bought before this cap existed) alone exceeded "
+                          "the 5%% budget and blocked every scout/emerging entry indefinitely. Independent of the "
+                          "per-tier position COUNT caps, which don't bound total dollar exposure on their own.")
     args = ap.parse_args()
     run_cycle(args)
 
