@@ -44,7 +44,10 @@ tier-target size) and scaled to full size only if price rises
 momentum" -- volume confirmation isn't implemented, no reliable live volume
 signal exists in this pipeline once a position is open). Sells enough to
 recoup 100% of cost basis once value reaches --profit-take-multiple (default
-2.5x), letting the remainder ride with zero capital still at risk. Capped in
+2.0x), letting the remainder ride with zero capital still at risk, on a
+tighter --scout-trailing-stop-pct (default 8%) than other tiers get
+pre-profit-take -- "chase highs up and sell as soon as they go down."
+Capped in
 aggregate by --max-memecoin-exposure-fraction (default 20% of portfolio,
 scout+emerging combined -- was 5% at the user's original request, raised
 after a single pre-existing emerging position alone exceeded that budget
@@ -727,11 +730,20 @@ def run_cycle(args):
             # profit-take above instead of the full position closing out at
             # +35% before it ever gets there.
             take_profit_threshold = None if pos.get("tier") == "scout" else args.take_profit_pct
+            # Scout tier chases with a tighter trailing stop than other
+            # tiers -- explicit user request: "chase highs up and sell as
+            # soon as they go down" for these higher-risk, low-dollar
+            # positions specifically, without touching the wider stop that's
+            # been working well for established/emerging/blue_chip (CATE,
+            # established tier, is 4/4 live). Only applies pre-profit-take;
+            # once profit_taken, the position uses house_money_trailing_stop_pct
+            # (wider, 30%) instead, so a proven winner still gets room to run.
+            trailing_stop_threshold = args.scout_trailing_stop_pct if pos.get("tier") == "scout" else args.trailing_stop_pct
             if ret <= -args.stop_loss_pct:
                 exit_reason = f"stop-loss ({ret:+.1%})"
             elif take_profit_threshold is not None and ret >= take_profit_threshold:
                 exit_reason = f"take-profit ({ret:+.1%})"
-            elif ret > 0 and drawdown_from_peak <= -args.trailing_stop_pct:
+            elif ret > 0 and drawdown_from_peak <= -trailing_stop_threshold:
                 exit_reason = f"trailing-stop ({drawdown_from_peak:+.1%} from peak)"
         if exit_reason is None and not pos.get("profit_taken"):
             # Deliberately NOT gated on `mint in eligible` (a real gap this
@@ -1135,6 +1147,13 @@ def main():
                           "than either loop's own interval), and immediately stopped out again.")
     ap.add_argument("--take-profit-pct", dest="take_profit_pct", type=float, default=0.35)
     ap.add_argument("--trailing-stop-pct", dest="trailing_stop_pct", type=float, default=0.12)
+    ap.add_argument("--scout-trailing-stop-pct", dest="scout_trailing_stop_pct", type=float, default=0.08,
+                     help="Tighter than --trailing-stop-pct, applies to scout tier only (pre-profit-take). "
+                          "Explicit user request: 'chase highs up and sell as soon as they go down' for these "
+                          "higher-risk, low-dollar positions -- react faster than the 12%% other tiers use, since "
+                          "the whole point of scout is exploiting fast moves on thin/new tokens, not riding out "
+                          "their full volatility. Once profit_taken fires, house_money_trailing_stop_pct (wider) "
+                          "takes over instead, so a proven winner still gets room to run.")
     ap.add_argument("--house-money-trailing-stop-pct", dest="house_money_trailing_stop_pct", type=float, default=0.30,
                      help="Wider than --trailing-stop-pct -- applies only after a scout position's profit-take "
                           "fires (cost basis already recouped, nothing left to lose), replacing the normal "
@@ -1193,9 +1212,14 @@ def main():
     ap.add_argument("--scale-in-price-threshold-pct", dest="scale_in_price_threshold_pct", type=float, default=0.15,
                      help="price up this much from scout entry = 'price action confirms momentum' -> top up to "
                           "the full tier-target size")
-    ap.add_argument("--profit-take-multiple", dest="profit_take_multiple", type=float, default=2.5,
+    ap.add_argument("--profit-take-multiple", dest="profit_take_multiple", type=float, default=2.0,
                      help="sell enough to recoup 100%% of cost basis once position value reaches this multiple of "
-                          "cost basis ('2x to 3x gain') -- the remainder rides with zero capital still at risk")
+                          "cost basis ('2x to 3x gain') -- the remainder rides with zero capital still at risk. "
+                          "Was 2.5x; lowered to 2.0x (the low end of that original range, not below it) per "
+                          "explicit user request to 'take profits sooner so slots free up faster' -- this also "
+                          "directly frees max_memecoin_exposure_fraction room sooner, since "
+                          "memecoin_exposure_usd() marks to market (quantity * price), and a profit-take reduces "
+                          "quantity, not just cost basis.")
     ap.add_argument("--max-scout-positions", dest="max_scout_positions", type=int, default=8,
                      help="separate count cap from --max-emerging-tier-positions -- scout sizes are much smaller "
                           "individually, so more concurrent slots still keeps aggregate exposure bounded by "
