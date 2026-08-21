@@ -250,6 +250,52 @@ class TestCycleLock(unittest.TestCase):
         self.assertLess(time.time() - start, 5.0, "a stale lock should be broken quickly, not hang")
 
 
+class TestRecentlyStoppedOut(unittest.TestCase):
+    """recently_stopped_out() -- the stop-loss re-entry cooldown, mirroring
+    config/risk.yaml's min_hours_between_trades_same_token. Added after
+    mining the journal found CEZ stopped out, was re-bought only ~2 hours
+    later (well under the configured 4h), and immediately stopped out again
+    -- running two independent loops against the same state meant real
+    cadence between cycles was faster than either loop's own interval."""
+
+    def test_true_within_cooldown_window(self):
+        now = datetime(2026, 1, 1, 12, 0, tzinfo=timezone.utc)
+        closed_trades = [{"mint": "X", "reason": "stop-loss (-15.0%)",
+                           "closed_at": (now - timedelta(hours=2)).isoformat()}]
+        self.assertTrue(p.recently_stopped_out(closed_trades, "X", now, cooldown_hours=4.0))
+
+    def test_false_once_cooldown_window_has_passed(self):
+        now = datetime(2026, 1, 1, 12, 0, tzinfo=timezone.utc)
+        closed_trades = [{"mint": "X", "reason": "stop-loss (-15.0%)",
+                           "closed_at": (now - timedelta(hours=5)).isoformat()}]
+        self.assertFalse(p.recently_stopped_out(closed_trades, "X", now, cooldown_hours=4.0))
+
+    def test_false_for_a_different_mint(self):
+        now = datetime(2026, 1, 1, 12, 0, tzinfo=timezone.utc)
+        closed_trades = [{"mint": "OTHER", "reason": "stop-loss (-15.0%)",
+                           "closed_at": (now - timedelta(minutes=5)).isoformat()}]
+        self.assertFalse(p.recently_stopped_out(closed_trades, "X", now, cooldown_hours=4.0))
+
+    def test_false_for_a_non_stop_loss_exit(self):
+        # take-profit / trailing-stop are good outcomes -- only a stop-loss
+        # exit should trigger a cooldown before re-entering the same token
+        now = datetime(2026, 1, 1, 12, 0, tzinfo=timezone.utc)
+        for reason in ("take-profit (+35.0%)", "trailing-stop (-12.0% from peak)", "strategy sell signal"):
+            with self.subTest(reason=reason):
+                closed_trades = [{"mint": "X", "reason": reason,
+                                   "closed_at": (now - timedelta(minutes=5)).isoformat()}]
+                self.assertFalse(p.recently_stopped_out(closed_trades, "X", now, cooldown_hours=4.0))
+
+    def test_malformed_closed_at_degrades_to_false_not_a_crash(self):
+        now = datetime(2026, 1, 1, 12, 0, tzinfo=timezone.utc)
+        closed_trades = [{"mint": "X", "reason": "stop-loss (-15.0%)", "closed_at": "not-a-timestamp"}]
+        self.assertFalse(p.recently_stopped_out(closed_trades, "X", now, cooldown_hours=4.0))
+
+    def test_empty_closed_trades(self):
+        now = datetime(2026, 1, 1, 12, 0, tzinfo=timezone.utc)
+        self.assertFalse(p.recently_stopped_out([], "X", now, cooldown_hours=4.0))
+
+
 class TestMemecoinExposureUsd(unittest.TestCase):
     """memecoin_exposure_usd() sums scout+emerging tier value -- what
     max_memecoin_exposure_fraction caps ('risk a maximum of 5% of total

@@ -18,13 +18,19 @@ Simplifications vs. the live trade-cycle skill (documented, not hidden):
   - No real swap quote, so no live slippage/price-impact check -- a fixed
     fee_bps + slippage_bps cost is assumed instead (same convention as
     backtest/engine.py).
-  - No max_daily_trade_count / max_daily_volume_usd / multi-cycle
-    min_hours_between_trades cadence caps -- this script is typically run
-    manually or via /loop at a deliberate interval, so cadence is controlled
-    by how often you run it. The one exception: a mint sold this cycle can't
-    be bought back in the SAME cycle (a real observed gap -- a take-profit
-    exit and an immediate same-price re-entry would otherwise cancel out the
-    exit's purpose, which cycle-interval spacing alone doesn't prevent).
+  - No max_daily_trade_count / max_daily_volume_usd cadence caps -- this
+    script is typically run manually or via /loop at a deliberate interval,
+    so cadence is controlled by how often you run it. Two same-token
+    re-entry guards DO exist, both real observed gaps: a mint sold this
+    cycle can't be bought back in the SAME cycle (a take-profit exit and an
+    immediate same-price re-entry would otherwise cancel out the exit's
+    purpose), and a mint stopped out via stop-loss can't be re-bought for
+    --min-hours-between-trades-same-token (default 4h, matches
+    config/risk.yaml) -- see recently_stopped_out(). The stop-loss cooldown
+    was added after running two independent loops (this session's cron +
+    a local terminal loop) against the same state made actual cadence
+    between cycles faster than either loop's own interval, letting a token
+    whipsaw a stop-loss twice within ~2 hours.
   - Core position sizing, tiering, volatility scaling, portfolio heat,
     regime filter, and stop-loss/take-profit/trailing-stop ARE all real,
     reusing the exact same code (backtest/strategies.py, research/discover_candidates.py)
@@ -513,6 +519,37 @@ def compute_scale_in_topup(cost_basis_usd: float, full_target_size: float, cash_
     return capped_needed, None
 
 
+def recently_stopped_out(closed_trades: list[dict], mint: str, now: datetime, cooldown_hours: float) -> bool:
+    """True if `mint` was closed via a stop-loss within the last
+    cooldown_hours -- mirrors config/risk.yaml's
+    min_hours_between_trades_same_token (4h), the same cadence cap the live
+    trade-cycle skill enforces. Only a stop-loss exit triggers this: a
+    take-profit or trailing-stop exit is a good outcome, and immediate
+    same-cycle re-entry after any exit is already blocked separately by
+    sold_this_cycle -- this covers the multi-cycle gap that leaves.
+
+    This module's docstring documents skipping a real multi-cycle cooldown
+    as deliberate ('cadence is controlled by how often you run it'), which
+    held while only one process ran cycles. Mining the journal found it
+    doesn't hold once two independent loops (this session's cron + a local
+    terminal loop) both run cycles against the same state: CEZ was stopped
+    out at -29.6%, then re-bought only ~2 hours later (under the configured
+    4h) and immediately stopped out again at -15.3% -- the loops' combined
+    cadence was faster than either loop's own interval. A stop-loss cooldown
+    is risk-reducing, not risk-adding, so it's a safe default to add rather
+    than something that needs the exposure-cap-style live risk sign-off."""
+    for trade in closed_trades:
+        if trade.get("mint") != mint or "stop-loss" not in (trade.get("reason") or ""):
+            continue
+        try:
+            closed_at = datetime.fromisoformat(trade["closed_at"])
+        except (KeyError, ValueError, TypeError):
+            continue
+        if (now - closed_at).total_seconds() < cooldown_hours * 3600:
+            return True
+    return False
+
+
 def portfolio_heat_pct(state: dict, prices: dict[str, float], stop_loss_pct: float) -> float:
     value = portfolio_value_usd(state, prices)
     if value <= 0:
@@ -817,6 +854,11 @@ def run_cycle(args):
                 # right back in the same cycle before this guard existed.
                 not_traded[mint] = "sold this same cycle -- not re-entering immediately (mirrors live's min_hours_between_trades_same_token)"
                 continue
+            if recently_stopped_out(state["closed_trades"], mint, cycle_start, args.min_hours_between_trades_same_token):
+                not_traded[mint] = (f"stopped out within the last {args.min_hours_between_trades_same_token}h -- "
+                                     f"cooldown before re-entering the same token (mirrors live's "
+                                     f"min_hours_between_trades_same_token)")
+                continue
             if open_slots <= 0:
                 not_traded[mint] = f"no open slots (max_concurrent_positions={args.max_concurrent_positions})"
                 continue
@@ -1052,6 +1094,13 @@ def main():
     ap.add_argument("--volatility-size-max-mult", dest="volatility_size_max_mult", type=float, default=1.5)
     ap.add_argument("--max-portfolio-heat-pct", dest="max_portfolio_heat_pct", type=float, default=0.12)
     ap.add_argument("--stop-loss-pct", dest="stop_loss_pct", type=float, default=0.15)
+    ap.add_argument("--min-hours-between-trades-same-token", dest="min_hours_between_trades_same_token",
+                     type=float, default=4.0,
+                     help="Matches config/risk.yaml's value of the same name -- a stop-loss exit on a mint blocks "
+                          "re-entering that same mint until this many hours pass (see recently_stopped_out()). "
+                          "Added after mining the journal found CEZ stopped out, was re-bought ~2h later (running "
+                          "two independent loops against the same state meant cadence between cycles was faster "
+                          "than either loop's own interval), and immediately stopped out again.")
     ap.add_argument("--take-profit-pct", dest="take_profit_pct", type=float, default=0.35)
     ap.add_argument("--trailing-stop-pct", dest="trailing_stop_pct", type=float, default=0.12)
     ap.add_argument("--house-money-trailing-stop-pct", dest="house_money_trailing_stop_pct", type=float, default=0.30,
