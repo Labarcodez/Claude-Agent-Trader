@@ -162,6 +162,7 @@ circuit-breaker recovery.
 | `docs/PHANTOM_MCP_SETUP.md` | Wallet setup & funding |
 | `docs/STRATEGY.md` | Coin fundamentals, autonomous discovery, strategy/risk reasoning |
 | `docs/RUNBOOK.md` | Day-to-day operation |
+| `docs/TERMUX_SETUP.md` | Running on Android via Termux |
 | `journal/` | Append-only trade log (`trades.jsonl` real, `paper_trades.jsonl` simulated) |
 | `state/circuit_breaker.json` | Circuit breaker status |
 | `state/paper_portfolio.json` | Paper-trading simulated portfolio state |
