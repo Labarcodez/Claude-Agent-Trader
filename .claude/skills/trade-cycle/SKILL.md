@@ -20,6 +20,38 @@ tell the user -- Phantom's auth is a local browser flow, so this only works in
 a session running on a machine that has completed that auth (see
 `docs/PHANTOM_MCP_SETUP.md`). Do not attempt to simulate wallet state.
 
+## 0.5. Acquire the cycle lock
+
+Before touching `state/starting_capital.json`, `state/circuit_breaker.json`,
+or `journal/trades.jsonl`, acquire the same cross-process lock
+`paper_trading/run_paper_cycle.py` uses (`scripts/cycle_lock.py`'s
+`CycleLock`) -- this is real money now, and this skill is even more exposed
+to the concurrent-process race that lock was built for than paper trading
+was: there's no single Python process managing the writes atomically here,
+just an LLM session reading and writing files across several separate tool
+calls, so a second concurrent trade-cycle run (this session's cron loop and
+a local terminal session both running it, a real setup this project has
+seen) has a wide window to race on the same state. Mining
+`journal/paper_trades.jsonl` found the exact failure signature this
+prevents: two near-simultaneous decisions on the same symbol, seconds
+apart, because two processes each read the same pre-trade state before
+either wrote back.
+
+Run this once, at the very start of the cycle, and wait for it to return
+(it blocks until any concurrent cycle releases, or until a stale lock times
+out on its own):
+```
+python3 -c "import sys; sys.path.insert(0, '.'); from pathlib import Path; from scripts.cycle_lock import CycleLock; CycleLock(Path('state/trade_cycle.lock')).acquire()"
+```
+Then run this exact command as the LAST thing you do this cycle, no matter
+how the cycle ends (a normal hold/trade, an early stop at a failed gate, a
+circuit breaker trip, or an unexpected error) -- an unreleased lock blocks
+every future cycle, including the next scheduled one, until its 280s
+timeout breaks it:
+```
+python3 -c "import sys; sys.path.insert(0, '.'); from pathlib import Path; from scripts.cycle_lock import CycleLock; CycleLock(Path('state/trade_cycle.lock')).release()"
+```
+
 ## 1. Safety gate (do this before anything else touches the wallet)
 
 1. Read `config/risk.yaml`. If the file is missing, or `enabled: false`,
