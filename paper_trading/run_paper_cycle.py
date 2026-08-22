@@ -1066,7 +1066,12 @@ def main():
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--reset", action="store_true", help="Wipe paper state and restart at --starting-capital-usd")
     ap.add_argument("--starting-capital-usd", type=float, default=50.0)
-    ap.add_argument("--max-candidates", type=int, default=40)
+    ap.add_argument("--max-candidates", type=int, default=250,
+                     help="Was 40 -- raised to match config/discovery.yaml's max_candidates_per_cycle after the "
+                          "live pathway (research/discover_candidates.py) needed it to actually surface rare real "
+                          "candidates; paper trading's own rotation history (select_candidates_for_rotation) "
+                          "already covered the pool well at 40 thanks to its faster cadence, but there's no "
+                          "reason for the two to drift apart.")
     ap.add_argument("--limit-per-source", type=int, default=15)
     ap.add_argument("--request-delay", type=float, default=0.4)
     ap.add_argument("--history-days", type=int, default=90,

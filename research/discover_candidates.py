@@ -298,8 +298,12 @@ def evaluate_candidate(mint: str, tok: dict, args) -> dict:
 
 def main():
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    ap.add_argument("--max-candidates", type=int, default=40,
-                     help="Cap on unique candidates evaluated per run (be a good citizen to free APIs) -- keep in sync with config/discovery.yaml's max_candidates_per_cycle")
+    ap.add_argument("--max-candidates", type=int, default=250,
+                     help="Cap on unique candidates evaluated per run (be a good citizen to free APIs) -- keep in "
+                          "sync with config/discovery.yaml's max_candidates_per_cycle. Was 40; raised after "
+                          "verifying live that a 250-sample run found a real eligible candidate (MANLET) on the "
+                          "same safety thresholds a same-day 40-sample run had missed by chance -- see "
+                          "config/discovery.yaml's comment on max_candidates_per_cycle for the full reasoning.")
     ap.add_argument("--limit-per-source", type=int, default=15)
     ap.add_argument("--request-delay", type=float, default=0.4, help="Seconds between RugCheck/DexScreener calls")
     ap.add_argument("--no-organic", action="store_true", help="Skip the toporganicscore source")

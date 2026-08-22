@@ -40,18 +40,20 @@ sources:
                                   # all, no matter how many cycles ran, until this was added. No limit_per_interval
                                   # concept -- it's one flat list, not an interval-based ranking.
 
-# Widened from 20 -- with the old cap, real eligible candidates (e.g. a live
-# run that found VINE/TripleT eligible) were sitting past position #15,
-# outside paper_trading's old max-candidates default of 15 -- so breadth was
-# the limiting factor, not safety. 40 doubles evaluation depth while staying
-# well inside "be a good citizen to free public APIs" territory (RugCheck is
-# only spent on stage-1 survivors, per research/discover_candidates.py).
-# With jupiter_verified_tag now in the pool (2,561+ tokens), this cap is what
-# makes evaluating a pool that size safe -- the discovery rotation logic in
-# paper_trading/run_paper_cycle.py's max_candidates handling is what ensures
-# the full pool actually gets covered over many cycles instead of the same
-# 40 every time.
-max_candidates_per_cycle: 40
+# Widened from 20, then 40, now 250. The 40 -> 250 jump: research/
+# discover_candidates.py's live run (what trade-cycle actually calls) has no
+# rotation-history tracking across cycles the way paper_trading's
+# select_candidates_for_rotation() does -- each run is an independent random
+# shuffle-then-slice of the full ~2,793-token pool. Combined with the live
+# loop's slower cadence (every 15min, vs paper trading's 5min -- 3x fewer
+# cycles/hour to average out over), a 40-candidate sample was genuinely
+# missing real eligible candidates by chance, not because none existed:
+# verified live, a --max-candidates 250 run found MANLET eligible
+# (emerging tier) on the exact same safety thresholds a same-day 40-sample
+# run had missed. Cost: ~100s added per discovery run (RugCheck is still
+# only spent on stage-1 survivors, per research/discover_candidates.py) --
+# comfortably inside the live loop's 15-minute budget.
+max_candidates_per_cycle: 250
 
 # Always considered as candidates regardless of whether live discovery
 # surfaces them this cycle. Use this for a token you specifically want kept

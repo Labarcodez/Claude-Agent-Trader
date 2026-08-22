@@ -128,7 +128,12 @@ def main():
                           "for a 30-day SMA to show more than one or two real crossovers. Freshly-discovered "
                           "tokens without 180d of history still work fine (main() already skips/uses whatever "
                           "history exists if under 20 points).")
-    ap.add_argument("--max-candidates", type=int, default=40)
+    ap.add_argument("--max-candidates", type=int, default=250,
+                     help="Was 40 -- raised to match config/discovery.yaml's max_candidates_per_cycle (see its "
+                          "comment: a small sample was missing rare real eligible candidates by chance, not "
+                          "because none existed). The backtesting cost this adds scales with how many end up "
+                          "eligible (typically ~1), not with this number directly -- the discovery-evaluation "
+                          "stage itself stays cheap (RugCheck only for stage-1 survivors).")
     ap.add_argument("--limit-per-source", type=int, default=15)
     ap.add_argument("--request-delay", type=float, default=0.4)
     ap.add_argument("--skip-discovery", action="store_true", help="Only backtest SOL + BTC (fast, no discovery pass)")
