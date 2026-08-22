@@ -3,6 +3,6 @@
   "tripped_at": null,
   "reason": null,
   "portfolio_value_usd_at_trip": null,
-  "peak_portfolio_value_usd": 55.85,
+  "peak_portfolio_value_usd": 55.9,
   "notes": "Managed by the trade-cycle skill. peak_portfolio_value_usd starts null and is initialized to the actual wallet balance on the first cycle (see trade-cycle SKILL.md step 2) -- there is no assumed starting amount, so don't hand-set this to a dollar figure. Do not hand-edit `tripped` to true without also setting reason -- do not hand-edit it to false to resume trading; instead fix the underlying issue and have a human flip config/risk.yaml enabled back on, which the skill treats as the real resume signal."
 }
