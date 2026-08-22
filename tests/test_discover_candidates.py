@@ -3,6 +3,7 @@ mocked RugCheck responses, no real network calls (evaluate_candidate's stage-1
 checks run on plain dicts; fetch_rugcheck_report is patched for stage 2).
 Run: python3 -m unittest discover -s tests -v"""
 import argparse
+import http.client
 import io
 import sys
 import unittest
@@ -304,6 +305,37 @@ class TestGetJsonRetry(unittest.TestCase):
     @patch("urllib.request.urlopen")
     def test_gives_up_after_exhausting_retries_on_persistent_502(self, mock_urlopen, mock_sleep):
         mock_urlopen.side_effect = self._http_error(502)
+        result = disco._get_json("http://x", retries=3)
+        self.assertIsNone(result)
+        self.assertEqual(mock_urlopen.call_count, 3)
+
+    @patch("time.sleep", return_value=None)
+    @patch("urllib.request.urlopen")
+    def test_retries_on_raw_connection_reset_then_succeeds(self, mock_urlopen, mock_sleep):
+        # Regression test: RugCheck.xyz reset the connection mid-request live,
+        # and this environment's urllib.request.AbstractHTTPHandler.do_open()
+        # re-raises the raw http.client.RemoteDisconnected instead of wrapping
+        # it in urllib.error.URLError (some Python builds do wrap it, this one
+        # doesn't) -- so a `except (URLError, TimeoutError)` clause alone
+        # never catches it, and the whole discovery cycle crashed uncaught
+        # with no journal entry for that cycle. RemoteDisconnected IS an
+        # OSError subclass though, so catching OSError broadly (which also
+        # subsumes URLError and TimeoutError) fixes it.
+        success_resp = MagicMock()
+        success_resp.read.return_value = b'{"ok": true}'
+        success_resp.__enter__.return_value = success_resp
+        mock_urlopen.side_effect = [
+            http.client.RemoteDisconnected("Remote end closed connection without response"),
+            success_resp,
+        ]
+        result = disco._get_json("http://x")
+        self.assertEqual(result, {"ok": True})
+        self.assertEqual(mock_urlopen.call_count, 2)
+
+    @patch("time.sleep", return_value=None)
+    @patch("urllib.request.urlopen")
+    def test_gives_up_after_exhausting_retries_on_persistent_connection_reset(self, mock_urlopen, mock_sleep):
+        mock_urlopen.side_effect = http.client.RemoteDisconnected("Remote end closed connection without response")
         result = disco._get_json("http://x", retries=3)
         self.assertIsNone(result)
         self.assertEqual(mock_urlopen.call_count, 3)

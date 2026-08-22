@@ -95,6 +95,19 @@ def _fetch(url: str, retries: int = 4, base_wait: float = 10.0) -> dict:
                 time.sleep(wait)
                 continue
             raise
+        except OSError as e:
+            # This function previously retried nothing but HTTPError, so any
+            # connection-level failure (timeout, reset, DNS hiccup) crashed
+            # the whole run on the first occurrence -- confirmed live via an
+            # uncaught http.client.RemoteDisconnected from a different
+            # upstream (RugCheck.xyz, in research/discover_candidates.py's
+            # _get_json, which had the same gap -- see that fix for why
+            # urllib doesn't always wrap these as URLError). Mirroring the
+            # same broad-OSError retry here for the same reason.
+            last_err = e
+            wait = base_wait * (attempt + 1)
+            print(f"Connection error, waiting {wait:.0f}s...")
+            time.sleep(wait)
     raise last_err
 
 

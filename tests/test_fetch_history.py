@@ -1,6 +1,7 @@
 """Unit tests for backtest/fetch_history.py's daily resampling -- no network
 access (operates on synthetic [timestamp_ms, value] series).
 Run: python3 -m unittest discover -s tests -v"""
+import http.client
 import io
 import sys
 import unittest
@@ -93,6 +94,34 @@ class TestFetchRetry(unittest.TestCase):
         with self.assertRaises(urllib.error.HTTPError):
             fh._fetch("http://x")
         self.assertEqual(mock_urlopen.call_count, 1)
+
+    @patch("time.sleep", return_value=None)
+    @patch("urllib.request.urlopen")
+    def test_retries_on_raw_connection_reset_then_succeeds(self, mock_urlopen, mock_sleep):
+        # Regression test: before this fix, _fetch() retried nothing but
+        # HTTPError, so a raw connection-level failure (this environment's
+        # urllib doesn't always wrap these as URLError -- see
+        # research/discover_candidates.py's _get_json for the confirmed live
+        # case) crashed the entire paper-trading/backtest run on the very
+        # first attempt instead of retrying like a rate-limit does.
+        success_resp = MagicMock()
+        success_resp.read.return_value = b'{"ok": true}'
+        success_resp.__enter__.return_value = success_resp
+        mock_urlopen.side_effect = [
+            http.client.RemoteDisconnected("Remote end closed connection without response"),
+            success_resp,
+        ]
+        result = fh._fetch("http://x")
+        self.assertEqual(result, {"ok": True})
+        self.assertEqual(mock_urlopen.call_count, 2)
+
+    @patch("time.sleep", return_value=None)
+    @patch("urllib.request.urlopen")
+    def test_gives_up_after_exhausting_retries_on_persistent_connection_reset(self, mock_urlopen, mock_sleep):
+        mock_urlopen.side_effect = http.client.RemoteDisconnected("Remote end closed connection without response")
+        with self.assertRaises(http.client.RemoteDisconnected):
+            fh._fetch("http://x", retries=3)
+        self.assertEqual(mock_urlopen.call_count, 3)
 
 
 if __name__ == "__main__":

@@ -89,7 +89,16 @@ def _get_json(url: str, retries: int = 3, backoff: float = 2.0):
                 return None
             last_err = e
             break
-        except (urllib.error.URLError, TimeoutError) as e:
+        except OSError as e:
+            # Broad on purpose: URLError and TimeoutError are both OSError
+            # subclasses (HTTPError too, but it's caught by the more specific
+            # clause above first), so this also catches raw connection-level
+            # failures -- confirmed live when RugCheck.xyz reset the
+            # connection mid-request and this environment's urllib raised a
+            # bare http.client.RemoteDisconnected instead of wrapping it in
+            # URLError. Un-widened, that crashed the entire cycle with no
+            # journal entry instead of retrying like every other transient
+            # failure here.
             last_err = e
             time.sleep(backoff)
     print(f"  ! request failed: {url} ({last_err})", file=sys.stderr)
