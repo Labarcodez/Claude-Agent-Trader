@@ -7,15 +7,30 @@ research/results/
 .phantom-mcp/
 *session.json
 
+# Local Solana keypair fallback (wallet/ -- see docs/LOCAL_WALLET_SETUP.md,
+# now DEPRECATED in favor of Kraken, see docs/KRAKEN_SETUP.md).
+# Holds a live private key. NEVER commit this.
+.env
+# Timestamped .env backups (e.g. taken before rotating to a new credential
+# type) hold the same class of secret as .env itself -- never commit these
+# either. Matches the existing state/*.bak-* convention below.
+.env.bak-*
+wallet/node_modules/
+
 # Trade journal is real trading history -- keep it local by default.
 # Remove this line if you deliberately want to version-control your trade log.
 journal/trades.jsonl
+# Timestamped backups of the above (e.g. taken on a venue switch, like the
+# 2026-08-26 Solana -> Kraken migration) hold the same real trading history
+# -- same local-by-default treatment.
+journal/trades.jsonl.bak-*
 
 # Paper-trading state/journal -- regenerates fresh on first run
 # (paper_trading/run_paper_cycle.py creates it automatically), and stays
 # local since it's a running simulation, not source.
 state/paper_portfolio.json
 journal/paper_trades.jsonl
+journal/paper_trades.jsonl.bak-*
 
 # Regime filter cache (paper_trading/run_paper_cycle.py) -- short-lived
 # (REGIME_CACHE_TTL_SECONDS), regenerates automatically, not source.
@@ -25,10 +40,12 @@ state/regime_cache.json
 # same reasoning, short-lived (PRICE_HISTORY_CACHE_TTL_SECONDS).
 state/price_history_cache/
 
-# Discovery rotation history (paper_trading/run_paper_cycle.py) -- a rolling
-# FIFO of recently-evaluated mints so discovery's max_candidates cap rotates
-# across cycles instead of always favoring the same head-of-list tokens.
-state/discovery_rotation.json
+# Per-pair discovery trend history (research/discover_candidates.py's
+# record_and_compute_trend()) -- a rolling window of volume/spread
+# snapshots used to compute growth rates. Regenerates over time from live
+# cycles, not source.
+state/discovery_history.json
+state/paper_discovery_history.json
 
 # Cross-process lock guarding a paper-trading cycle's state read-modify-write
 # (paper_trading/run_paper_cycle.py's CycleLock) -- exists only for the
@@ -47,6 +64,12 @@ state/starting_capital.json
 # state/circuit_breaker.json IS tracked (it ships with an initial
 # tripped:false state); it will show as locally modified once the agent
 # starts updating it. That's expected -- commit or not, your call.
+
+# Timestamped backups of the files above (e.g. taken on a venue/wallet
+# switch, like the 2026-08-22 Phantom->local-keypair and 2026-08-26
+# Solana->Kraken migrations) -- same local-by-default treatment as what
+# they're backing up.
+state/*.bak-*
 
 __pycache__/
 *.pyc

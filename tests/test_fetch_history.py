@@ -124,5 +124,31 @@ class TestFetchRetry(unittest.TestCase):
         self.assertEqual(mock_urlopen.call_count, 3)
 
 
+class TestFetchOhlcKraken(unittest.TestCase):
+    """fetch_ohlc_kraken() wraps kraken/client.py's ohlc() into the same
+    {"prices": [...]} shape fetch_market_chart returns -- this is the
+    primary price-history source now that this project trades Kraken pairs
+    directly. Kraken's OHLC candles are already daily, so no resampling
+    step is needed here (contrast the CoinGecko path above)."""
+
+    @patch("kraken.client.ohlc")
+    def test_wraps_kraken_ohlc_result_in_prices_key(self, mock_ohlc):
+        mock_ohlc.return_value = [[1000, 50000.0], [2000, 51000.0]]
+        result = fh.fetch_ohlc_kraken("XBTUSD", 180)
+        self.assertEqual(result, {"prices": [[1000, 50000.0], [2000, 51000.0]]})
+        mock_ohlc.assert_called_once_with("XBTUSD", 180, retries=3, backoff=2.0)
+
+    @patch("kraken.client.ohlc")
+    def test_passes_through_retries_and_backoff_overrides(self, mock_ohlc):
+        mock_ohlc.return_value = []
+        fh.fetch_ohlc_kraken("XBTUSD", 90, retries=2, backoff=1.5)
+        mock_ohlc.assert_called_once_with("XBTUSD", 90, retries=2, backoff=1.5)
+
+
+class TestCacheKeyForKraken(unittest.TestCase):
+    def test_prefixes_pair_with_kraken(self):
+        self.assertEqual(fh.cache_key_for_kraken("XBTUSD"), "kraken_XBTUSD")
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -1,3 +1,9 @@
+> **DEPRECATED -- superseded by Kraken.** This project no longer trades via
+> Phantom MCP or Solana; see [KRAKEN_SETUP.md](KRAKEN_SETUP.md) for the
+> current setup. Kept here for historical reference only -- nothing in
+> `.claude/skills/`, `config/`, or the active pipeline references this
+> anymore.
+
 # Setting up the Phantom MCP server
 
 This connects Claude Code to a real Solana wallet Phantom creates and manages
@@ -81,6 +87,60 @@ zero).
 - **Re-authenticating on a new machine**: delete/ignore the old
   `~/.phantom-mcp/session.json` and repeat step 2; it'll issue a fresh
   session (same underlying wallet, tied to your Phantom account).
+- **Consent screen's "Allow" button is permanently disabled / unclickable
+  (device-connect flow stuck)**: confirmed live 2026-08-21 against an
+  already-funded wallet ("Agent Wallet 1", ~$56). Full investigation and
+  outcome, so a future session doesn't repeat it:
+  - `phantom_logout` clears `session.json` but does **not** clear
+    `~/.phantom-mcp/agent-registration.json` -- the cached OAuth Dynamic
+    Client Registration (DCR) `client_id` the device-code flow
+    (`DeviceCodeAuthProvider` in `@phantom/cli`, RFC 8628 device-code against
+    `connect.phantom.app/device-connect`) reuses on every login so it keeps
+    resolving to the *same* wallet across sessions.
+  - Moving that file aside to force a brand-new DCR registration did **not**
+    fix the disabled button -- it was disabled again immediately on the
+    fresh registration too. That rules out "this one specific registration
+    is stuck" as the cause; it points at an instability in the device-code
+    consent page itself, unrelated to which client is used.
+  - **Do not leave a regenerated/fresh DCR registration in place, and do not
+    switch to the SSO flow, as a workaround.** Both mint a brand-new
+    `client_id`, and wallet identity on Phantom's backend is resolved
+    partly from that `client_id` (`_getOrCreateAppWallet` in
+    `DeviceCodeAuthProvider.ts`) -- completing auth on a *different*
+    `client_id` than the one that originally created your funded wallet
+    risks the flow creating and attaching a second, empty wallet instead of
+    reconnecting to the one holding real funds. (The SSO flow is *worse* on
+    this axis, not better: `OAuthFlow.authenticate()` in `@phantom/cli`
+    doesn't cache to `agent-registration.json` at all -- it registers a
+    fresh, never-reused client on literally every login attempt, and its
+    own log line says outright: `"DCR is not currently supported by
+    auth.phantom.app - you should provide PHANTOM_APP_ID or
+    PHANTOM_CLIENT_ID"`.) If you ever need to force a fresh DCR
+    registration to test something, move the old
+    `agent-registration.json` aside rather than deleting it, and restore it
+    afterward rather than trading with whatever new wallet a fresh
+    registration might attach to.
+  - Net conclusion: with the original `agent-registration.json` restored
+    (the safe, wallet-identity-preserving state), the disabled-button
+    symptom itself remains unexplained from anything in this repo, your
+    local machine, or even this npm package's client-side code -- it did
+    not respond to logout, a fresh registration, disabling browser
+    extensions, or a different auth flow entirely. That combination points
+    at a genuine bug/outage in Phantom's own hosted consent page or backend,
+    not something fixable locally. If it recurs: check
+    https://github.com/orgs/phantom/discussions and
+    https://help.phantom.com for open reports, or contact Phantom support,
+    rather than spending more time on local workarounds -- and don't
+    experiment with anything that mints a new OAuth client (DCR reset, SSO
+    flow, `PHANTOM_CLIENT_ID` override to an unfamiliar value) against a
+    wallet that already holds funds without first confirming, from
+    Phantom's side, that doing so won't attach a different wallet.
+  - If you don't want to wait on Phantom, `docs/LOCAL_WALLET_SETUP.md`
+    documents a separate local-keypair execution path (plain Solana
+    keypair + `@solana/web3.js` + Jupiter's swap API, no browser consent
+    screen involved) that sidesteps this entirely. It's a genuinely
+    different wallet, funded fresh -- not a way to unstick funds already in
+    a Phantom-MCP-created wallet.
 
 ## References
 

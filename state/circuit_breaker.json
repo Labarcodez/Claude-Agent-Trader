@@ -3,6 +3,6 @@
   "tripped_at": null,
   "reason": null,
   "portfolio_value_usd_at_trip": null,
-  "peak_portfolio_value_usd": 56.17,
-  "notes": "Managed by the trade-cycle skill. peak_portfolio_value_usd starts null and is initialized to the actual wallet balance on the first cycle (see trade-cycle SKILL.md step 2) -- there is no assumed starting amount, so don't hand-set this to a dollar figure. Do not hand-edit `tripped` to true without also setting reason -- do not hand-edit it to false to resume trading; instead fix the underlying issue and have a human flip config/risk.yaml enabled back on, which the skill treats as the real resume signal."
+  "peak_portfolio_value_usd": null,
+  "notes": "Managed by the trade-cycle skill. peak_portfolio_value_usd starts null and is initialized to the actual account balance on the first cycle (see trade-cycle SKILL.md step 2) -- there is no assumed starting amount, so don't hand-set this to a dollar figure. Do not hand-edit `tripped` to true without also setting reason -- do not hand-edit it to false to resume trading; instead fix the underlying issue and have a human flip config/risk.yaml enabled back on, which the skill treats as the real resume signal. Reset to null on 2026-08-26 when switching from the wallet/ local-keypair Solana fallback to Kraken (see docs/KRAKEN_SETUP.md) -- the prior 57.61 peak belonged to a different, separately-funded wallet on a different venue entirely and would have falsely gated the new Kraken account."
 }

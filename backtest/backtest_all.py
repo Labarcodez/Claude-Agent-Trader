@@ -1,30 +1,27 @@
 #!/usr/bin/env python3
-"""Backtest EVERY currently-eligible discovered token (via
+"""Backtest EVERY currently-eligible Kraken pair (via
 research/discover_candidates.py) against EVERY strategy in
 backtest/strategies.py, with walk-forward (train/test) validation, producing
 one consolidated, ranked report. This is "backtest everything" -- the
-comprehensive sibling to the single-token workflow in
+comprehensive sibling to the single-pair workflow in
 .claude/skills/backtest-strategy.
 
-Always includes SOL and BTC (the regime-filter reference coin) even if
-neither shows up as a "discovered candidate" this run, since they're
+Always includes BTC/USD (the regime-filter reference pair) and ETH/USD even
+if neither shows up as a "discovered candidate" this run, since they're
 reference assets worth knowing strategy behavior on regardless.
 
-Live token history is fetched by contract address (see
-backtest/fetch_history.py's fetch_market_chart_by_contract), so this works
-even for tokens with no CoinGecko "coin id" of their own -- the same trick
-that makes paper_trading/run_paper_cycle.py able to trade freshly-discovered
-tokens.
+Price history is fetched directly from Kraken by pair (see
+backtest/fetch_history.py's fetch_ohlc_kraken) -- no CoinGecko dependency,
+no API key.
 
 Usage:
     python3 backtest/backtest_all.py
     python3 backtest/backtest_all.py --history-days 90 --max-candidates 15
-    python3 backtest/backtest_all.py --skip-discovery   # SOL + BTC only, fast
+    python3 backtest/backtest_all.py --skip-discovery   # BTC/ETH only, fast
 """
 from __future__ import annotations
 import argparse
 import json
-import random
 import sys
 import time
 from datetime import datetime, timezone
@@ -47,9 +44,9 @@ from backtest.strategies import STRATEGIES  # noqa: E402
 
 RESULTS_DIR = Path(__file__).parent / "results"
 
-CORE_REFERENCE_COINS = [
-    {"symbol": "SOL", "coin_id": "solana"},
-    {"symbol": "BTC", "coin_id": "bitcoin"},  # regime-filter reference (config/risk.yaml)
+CORE_REFERENCE_PAIRS = [
+    {"symbol": "BTC", "pair": "XBTUSD"},  # regime-filter reference (config/risk.yaml)
+    {"symbol": "ETH", "pair": "ETHUSD"},
 ]
 
 
@@ -61,37 +58,26 @@ def disco_args(args: argparse.Namespace) -> argparse.Namespace:
     script's own flags, same as research/discover_candidates.py and
     paper_trading/run_paper_cycle.py -- keep the three in sync by hand."""
     return argparse.Namespace(
-        request_delay=args.request_delay,
-        min_liquidity_usd=args.min_liquidity_usd, min_holder_count=args.min_holder_count,
-        min_organic_score=args.min_organic_score, min_pool_age_hours=args.min_pool_age_hours,
-        max_top_holder_pct=args.max_top_holder_pct,
-        require_mint_renounced=True, require_freeze_renounced=True, always_rugcheck=False,
-        cross_check_dexscreener=False,
-        blue_chip_mcap_usd=args.blue_chip_mcap_usd, blue_chip_holder_count=args.blue_chip_holder_count,
-        established_mcap_usd=args.established_mcap_usd, established_holder_count=args.established_holder_count,
+        min_24h_volume_usd=args.min_24h_volume_usd, max_spread_bps=args.max_spread_bps,
+        blue_chip_mcap_usd=args.blue_chip_mcap_usd, blue_chip_volume_usd=args.blue_chip_volume_usd,
+        established_mcap_usd=args.established_mcap_usd, established_volume_usd=args.established_volume_usd,
     )
 
 
 def discover_eligible(args) -> list[dict]:
-    candidates = disco.gather_candidates(argparse.Namespace(
-        no_organic=False, no_trending=False, no_traded=False, no_recent=False, no_verified=False,
-        limit_per_source=args.limit_per_source,
-    ))
-    # Shuffle before truncating -- see the same fix (and its rationale) in
-    # research/discover_candidates.py's main() and
-    # paper_trading/run_paper_cycle.py's select_candidates_for_rotation().
-    # Without it, this always sampled the same momentum-source head of the
-    # pool and never backtested anything from the much larger verified-tag
-    # tail -- an honesty gap for what "backtest everything currently
-    # eligible" actually means.
-    all_mints = list(candidates.keys())
-    random.shuffle(all_mints)
-    mints = all_mints[: args.max_candidates]
+    candidates = disco.gather_candidates(args)
+    all_pairs = sorted(candidates, key=lambda p: candidates[p]["volume_24h_usd"], reverse=True)
+    pairs = all_pairs[: args.max_candidates]
+    coingecko_ids = [disco.KRAKEN_TO_COINGECKO_ID[disco._kraken_base_altname(candidates[p]["base"])]
+                      for p in pairs if disco._kraken_base_altname(candidates[p]["base"]) in disco.KRAKEN_TO_COINGECKO_ID]
+    market_caps = disco.fetch_market_caps_usd(coingecko_ids)
     eligible = []
-    for mint in mints:
-        result = disco.evaluate_candidate(mint, candidates[mint], disco_args(args))
+    for pair in pairs:
+        cg_id = disco.KRAKEN_TO_COINGECKO_ID.get(disco._kraken_base_altname(candidates[pair]["base"]))
+        mcap_usd = market_caps.get(cg_id, 0) if cg_id else 0
+        result = disco.evaluate_candidate(pair, candidates[pair], disco_args(args), mcap_usd=mcap_usd)
         if result["eligible"]:
-            eligible.append({"symbol": result["symbol"], "mint": mint, "tier": result["tier"]})
+            eligible.append({"symbol": result["symbol"], "pair": pair, "tier": result["tier"]})
     return eligible
 
 
@@ -128,49 +114,45 @@ def main():
                           "for a 30-day SMA to show more than one or two real crossovers. Freshly-discovered "
                           "tokens without 180d of history still work fine (main() already skips/uses whatever "
                           "history exists if under 20 points).")
-    ap.add_argument("--max-candidates", type=int, default=250,
-                     help="Was 40 -- raised to match config/discovery.yaml's max_candidates_per_cycle (see its "
-                          "comment: a small sample was missing rare real eligible candidates by chance, not "
-                          "because none existed). The backtesting cost this adds scales with how many end up "
-                          "eligible (typically ~1), not with this number directly -- the discovery-evaluation "
-                          "stage itself stays cheap (RugCheck only for stage-1 survivors).")
-    ap.add_argument("--limit-per-source", type=int, default=15)
+    ap.add_argument("--max-candidates", type=int, default=700,
+                     help="mirrors config/discovery.yaml's max_candidates_per_cycle -- Kraken's full USD-pair "
+                          "universe (a few hundred) is cheap enough to evaluate in full every run, this only "
+                          "matters if that count ever exceeds it.")
     ap.add_argument("--request-delay", type=float, default=0.4)
-    ap.add_argument("--skip-discovery", action="store_true", help="Only backtest SOL + BTC (fast, no discovery pass)")
+    ap.add_argument("--skip-discovery", action="store_true", help="Only backtest BTC + ETH (fast, no discovery pass)")
     # Discovery safety/tier thresholds -- same flags and defaults as
     # research/discover_candidates.py and paper_trading/run_paper_cycle.py,
     # mirroring config/discovery.yaml. Override here if you want this run to
     # explore a looser/tighter universe than the live defaults.
-    ap.add_argument("--min-liquidity-usd", type=float, default=250_000)
-    ap.add_argument("--min-holder-count", type=int, default=500)
-    ap.add_argument("--min-organic-score", type=float, default=40)
-    ap.add_argument("--min-pool-age-hours", type=float, default=72)
-    ap.add_argument("--max-top-holder-pct", type=float, default=22.0)
-    ap.add_argument("--blue-chip-mcap-usd", type=float, default=50_000_000)
-    ap.add_argument("--blue-chip-holder-count", type=int, default=10_000)
-    ap.add_argument("--established-mcap-usd", type=float, default=5_000_000)
-    ap.add_argument("--established-holder-count", type=int, default=2_000)
+    ap.add_argument("--min-24h-volume-usd", type=float, default=1_000_000,
+                     help="mirrors research/discover_candidates.py's flag of the same name -- keep in sync")
+    ap.add_argument("--max-spread-bps", type=float, default=50.0,
+                     help="mirrors research/discover_candidates.py's flag of the same name -- keep in sync")
+    ap.add_argument("--blue-chip-mcap-usd", type=float, default=50_000_000_000)
+    ap.add_argument("--blue-chip-volume-usd", type=float, default=100_000_000)
+    ap.add_argument("--established-mcap-usd", type=float, default=1_000_000_000)
+    ap.add_argument("--established-volume-usd", type=float, default=10_000_000)
     args = ap.parse_args()
 
-    assets = [{"symbol": c["symbol"], "cache_key": c["coin_id"], "kind": "coin", "ref": c["coin_id"], "tier": "reference"}
-              for c in CORE_REFERENCE_COINS]
+    assets = [{"symbol": c["symbol"], "cache_key": fh.cache_key_for_kraken(c["pair"]), "ref": c["pair"], "tier": "reference"}
+              for c in CORE_REFERENCE_PAIRS]
 
     if not args.skip_discovery:
         print("Running discovery...")
         eligible = discover_eligible(args)
         print(f"{len(eligible)} eligible candidates to backtest.\n")
+        reference_pairs = {c["pair"] for c in CORE_REFERENCE_PAIRS}
         for c in eligible:
-            assets.append({"symbol": c["symbol"], "cache_key": f"contract_solana_{c['mint']}",
-                            "kind": "contract", "ref": c["mint"], "tier": c.get("tier")})
+            if c["pair"] in reference_pairs:
+                continue  # already backtesting this pair as a reference asset above -- don't do it twice
+            assets.append({"symbol": c["symbol"], "cache_key": fh.cache_key_for_kraken(c["pair"]),
+                            "ref": c["pair"], "tier": c.get("tier")})
 
     all_results = []
     for a in assets:
-        print(f"Fetching + backtesting {a['symbol']:<10} ({a['kind']}: {a['ref'][:20]}...)")
+        print(f"Fetching + backtesting {a['symbol']:<10} (pair: {a['ref']})")
         try:
-            if a["kind"] == "coin":
-                payload = fh.fetch_market_chart(a["ref"], args.history_days)
-            else:
-                payload = fh.fetch_market_chart_by_contract(a["ref"], args.history_days)
+            payload = fh.fetch_ohlc_kraken(a["ref"], args.history_days)
             n_points = len(payload.get("prices", []))
             if n_points < 20:
                 print(f"  ! only {n_points} price points -- too little history to backtest meaningfully, skipping")
@@ -181,7 +163,7 @@ def main():
             continue
         time.sleep(args.request_delay)
         rows = backtest_asset(a["cache_key"], args.history_days)
-        all_results.append({"symbol": a["symbol"], "mint_or_id": a["ref"], "tier": a["tier"], "results": rows})
+        all_results.append({"symbol": a["symbol"], "pair": a["ref"], "tier": a["tier"], "results": rows})
 
     RESULTS_DIR.mkdir(parents=True, exist_ok=True)
     out_path = RESULTS_DIR / f"backtest_all_{datetime.now(timezone.utc).strftime('%Y%m%dT%H%M%SZ')}.json"

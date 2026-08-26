@@ -102,6 +102,95 @@ def rsi_mean_reversion_trend_filtered(closes: list[float], i: int, state: dict, 
     return "hold"
 
 
+def ema_series(values: list[float], window: int) -> list[float] | None:
+    """Full exponential-moving-average series (not just the latest value) --
+    MACD's signal line needs an EMA computed on top of another EMA's own
+    output series, so the whole series has to be available, not just its
+    final point. Seeded with a plain SMA of the first `window` values (the
+    standard convention -- there's no prior EMA to seed from at the very
+    start of a series). Returns None if there isn't even enough history to
+    seed the first value."""
+    if len(values) < window:
+        return None
+    multiplier = 2 / (window + 1)
+    series = [sum(values[:window]) / window]
+    for price in values[window:]:
+        series.append((price - series[-1]) * multiplier + series[-1])
+    return series
+
+
+def macd(values: list[float], fast: int = 12, slow: int = 26, signal: int = 9) -> tuple[float, float] | None:
+    """Returns (macd_line, signal_line) as of the latest point in `values`.
+    macd_line = fast EMA - slow EMA (a faster-reacting weighted average minus
+    a slower one); signal_line is a signal-period EMA of the macd_line
+    series itself, not of price -- the standard MACD construction. None if
+    there isn't enough history yet (needs at least slow + signal bars)."""
+    fast_ema = ema_series(values, fast)
+    slow_ema = ema_series(values, slow)
+    if fast_ema is None or slow_ema is None:
+        return None
+    # fast_ema starts `slow - fast` bars earlier than slow_ema (its window is
+    # shorter, so it warms up sooner) -- align them to the same starting bar
+    # before subtracting, or the two series would be comparing different points in time.
+    offset = slow - fast
+    if offset < 0 or len(fast_ema) <= offset:
+        return None
+    macd_line_series = [f - s for f, s in zip(fast_ema[offset:], slow_ema)]
+    signal_series = ema_series(macd_line_series, signal)
+    if signal_series is None:
+        return None
+    return macd_line_series[-1], signal_series[-1]
+
+
+def macd_crossover(closes: list[float], i: int, state: dict, fast: int = 12, slow: int = 26, signal: int = 9) -> str:
+    """Trend-following momentum signal, distinct from sma_crossover's plain
+    moving-average cross: MACD's EMA-based construction weights recent
+    prices more heavily than a flat-window SMA, so it tends to react sooner
+    to a genuine trend change while still smoothing out single-bar noise.
+    Buy when the MACD line crosses above its own signal line, sell on the
+    reverse cross -- the classic MACD trading rule, using the standard
+    12/26/9 windows by default."""
+    window = closes[: i + 1]
+    result = macd(window, fast, slow, signal)
+    prev_result = macd(window[:-1], fast, slow, signal)
+    if result is None or prev_result is None:
+        return "hold"
+    macd_line, signal_line = result
+    prev_macd, prev_signal = prev_result
+    if prev_macd <= prev_signal and macd_line > signal_line:
+        return "buy"
+    if prev_macd >= prev_signal and macd_line < signal_line:
+        return "sell"
+    return "hold"
+
+
+def bollinger_mean_reversion(closes: list[float], i: int, state: dict, window: int = 20, num_std: float = 2.0) -> str:
+    """Buy when price closes at or below its lower Bollinger Band (a
+    window-period SMA minus num_std standard deviations of recent closes),
+    sell at or above the upper band. Distinct from rsi_mean_reversion's
+    bounded 0-100 oscillator: the bands widen and narrow with the asset's
+    OWN recent volatility, so what counts as "oversold" adapts automatically
+    to a calm vs. wild stretch instead of using the same fixed 30/70
+    threshold regardless of how volatile the asset currently is -- a real
+    difference for the wide range of volatility levels across Kraken's
+    pairs (a calm blue-chip vs. a wild emerging-tier pair)."""
+    window_vals = closes[: i + 1]
+    if len(window_vals) < window:
+        return "hold"
+    recent = window_vals[-window:]
+    mid = sum(recent) / window
+    variance = sum((v - mid) ** 2 for v in recent) / window
+    std = variance ** 0.5
+    if std == 0:
+        return "hold"  # flat/no-movement window -- no meaningful band to compare against
+    price = window_vals[-1]
+    if price <= mid - num_std * std:
+        return "buy"
+    if price >= mid + num_std * std:
+        return "sell"
+    return "hold"
+
+
 def volatility_breakout(closes: list[float], i: int, state: dict, lookback: int = 20,
                          breakout_mult: float = 1.0) -> str:
     """Buy when price breaks above the recent high by more than breakout_mult *
@@ -216,6 +305,8 @@ STRATEGIES = {
     "rsi_mean_reversion": rsi_mean_reversion,
     "rsi_mean_reversion_trend_filtered": rsi_mean_reversion_trend_filtered,
     "volatility_breakout": volatility_breakout,
+    "macd_crossover": macd_crossover,
+    "bollinger_mean_reversion": bollinger_mean_reversion,
     "adaptive_ensemble": adaptive_ensemble,
     "adaptive_ensemble_fast": adaptive_ensemble_fast,
 }

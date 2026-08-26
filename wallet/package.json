@@ -1,0 +1,13 @@
+{
+  "name": "claude-agent-trader-wallet",
+  "private": true,
+  "type": "module",
+  "description": "Local-keypair Solana signing (Jupiter swap API v6 + @solana/web3.js). Fallback execution path used ONLY when Phantom MCP's browser-based device auth is unavailable or broken -- see ../docs/LOCAL_WALLET_SETUP.md for why this exists and when to use it instead of the phantom MCP tools.",
+  "engines": {
+    "node": ">=18"
+  },
+  "dependencies": {
+    "@solana/web3.js": "^1.95.3",
+    "bs58": "^6.0.0"
+  }
+}

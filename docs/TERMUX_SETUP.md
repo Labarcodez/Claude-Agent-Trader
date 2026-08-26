@@ -1,13 +1,15 @@
 # Running this project in Termux (Android)
 
-This project's Python side (discovery, backtesting, paper trading, tests) has
-**zero third-party dependencies** -- stdlib only (`urllib`, `json`, `math`,
-`statistics`) -- so it runs on Termux with nothing more than `python3`. This
-has been verified live on-device. Live trading via Claude Code + Phantom MCP
-also works, but needs one workaround for a known Android/Termux
-incompatibility -- see Tier 2 below.
+This project's Python side (discovery, backtesting, paper trading, live
+Kraken execution, tests) has **zero third-party dependencies** -- stdlib
+only (`urllib`, `json`, `hmac`, `hashlib`, `base64`) -- so it runs on Termux
+with nothing more than `python3`. Unlike the old Solana pipeline, there's no
+Node.js dependency and no browser device-auth flow needed anywhere in this
+project anymore -- placing a real Kraken order (`kraken/propose_order.py
+--execute`) works from the same plain `python3` environment as everything
+else below.
 
-## Tier 1 -- discovery / backtesting / paper trading (no wallet needed)
+## Discovery / backtesting / paper trading / live execution
 
 ```bash
 # Install Termux from F-Droid, not the Play Store build (stale/unmaintained)
@@ -16,38 +18,35 @@ pkg install -y python git
 
 git clone https://github.com/Labarcodez/Claude-Agent-Trader.git
 cd Claude-Agent-Trader
-git checkout claude/phantom-mcps-trading-b9avtb
 
 # Unit tests -- fast, no network
 python3 -m unittest discover -s tests -v
 
-# The real pipeline pieces
-python3 research/discover_candidates.py       # live token discovery + safety checks
+# The real pipeline pieces -- none of these need a Kraken API key
+python3 research/discover_candidates.py       # live Kraken pair discovery + safety checks
 python3 backtest/backtest_all.py               # cross-asset backtest
 python3 paper_trading/run_paper_cycle.py       # simulated trading cycle
+
+# Fill in .env (see docs/KRAKEN_SETUP.md) to check a real balance or place a real order
+python3 -c "from kraken.client import balance; print(balance())"
+python3 kraken/propose_order.py XBTUSD buy 25.00              # quote only
+python3 kraken/propose_order.py XBTUSD buy 25.00 --execute    # places a real order -- run this deliberately, yourself
 ```
 
-Confirmed working end-to-end on-device: discovery found and safety-filtered
-real candidates, `backtest_all.py` produced a full report, and
-`run_paper_cycle.py` executed a minimum-size paper trade.
-
 **Expected, non-error output you may see and can ignore:**
-- `! could not fetch history: HTTP Error 404: Not Found` for a specific
-  token during `backtest_all.py` -- means that particular contract isn't
-  indexed on CoinGecko yet. The script skips it and keeps going; this is
-  not a bug.
-- `Rate limited, waiting 10s/20s/30s...` -- CoinGecko's free tier is
-  strict; `backtest/fetch_history.py` already retries with backoff. The run
+- Occasional `Rate limited, waiting Xs...` / `Connection error, waiting
+  Xs...` from `backtest/fetch_history.py`'s CoinGecko path (used only for
+  market-cap lookups, not price history) -- CoinGecko's free tier is
+  strict; the retry-with-backoff is expected behavior, not a bug. The run
   still completes, just slower.
 
-## Tier 2 -- live trading via Claude Code + Phantom MCP
+## Running Claude Code itself on Termux
 
-This needs Node.js (for `npx`/the Claude Code CLI) and a browser sign-in per
-[`PHANTOM_MCP_SETUP.md`](PHANTOM_MCP_SETUP.md). Termux has no GUI of its own,
-but Android does have a browser -- the device-code URL Phantom prints can be
-opened manually there.
+If you also want to run Claude Code's interactive CLI on-device (rather
+than just this project's plain Python scripts above), there's a known,
+unrelated Android/Termux compatibility issue worth knowing about upfront:
 
-### Known issue: Claude Code's native binary doesn't run on stock Termux
+### Claude Code's native binary doesn't run on stock Termux
 
 Since Claude Code v2.1.113, the CLI ships as a **native glibc-linked
 binary**. Termux/Android uses **Bionic libc**, not glibc, so the binary
@@ -81,15 +80,9 @@ npm install -g --allow-scripts=@anthropic-ai/claude-code @anthropic-ai/claude-co
 ```
 
 Avoid third-party/unofficial npm wrapper packages that claim to "fix"
-Claude Code on Termux -- this CLI will hold your Phantom wallet session
-credentials once authenticated, so its install script isn't something to
-hand to an unverified package.
-
-### After `claude` runs
-
-Start it from inside the repo directory so it picks up `.mcp.json`, then
-follow [`PHANTOM_MCP_SETUP.md`](PHANTOM_MCP_SETUP.md) for the device-code
-sign-in (open the printed URL in any Android browser) and wallet funding.
+Claude Code on Termux -- this CLI will have access to your `.env` file
+(Kraken API credentials) once configured, so its install script isn't
+something to hand to an unverified package.
 
 ### Keeping long-running cycles alive
 

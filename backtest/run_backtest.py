@@ -2,10 +2,15 @@
 """CLI to run and compare strategies from strategies.py against cached price
 history from fetch_history.py, and save a JSON report to backtest/results/.
 
+`--coin` is really just a cache key (venue-agnostic -- this file never
+changed for the Kraken pipeline) -- pass whatever fetch_history.py saved the
+cache as: `kraken_<PAIR>` for a Kraken pair (fetch_history.py's
+cache_key_for_kraken()), or a bare CoinGecko coin id for the CoinGecko path.
+
 Usage:
-    python3 backtest/fetch_history.py --coin solana --days 180
-    python3 backtest/run_backtest.py --coin solana --days 180 --strategy all
-    python3 backtest/run_backtest.py --coin solana --days 180 --strategy adaptive_ensemble --walk-forward
+    python3 backtest/fetch_history.py --kraken-pair XBTUSD --days 180
+    python3 backtest/run_backtest.py --coin kraken_XBTUSD --days 180 --strategy all
+    python3 backtest/run_backtest.py --coin kraken_XBTUSD --days 180 --strategy adaptive_ensemble --walk-forward
 """
 import argparse
 import json
@@ -35,7 +40,7 @@ def _summary_row(name: str, coin: str, days: int, result) -> dict:
 
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument("--coin", required=True, help="CoinGecko coin id (must match a cached file)")
+    ap.add_argument("--coin", required=True, help="Cache key (must match a cached file) -- e.g. kraken_XBTUSD, or a CoinGecko coin id")
     ap.add_argument("--days", type=int, default=180)
     ap.add_argument("--strategy", default="all", choices=list(STRATEGIES) + ["all"])
     ap.add_argument("--fee-bps", type=float, default=30)

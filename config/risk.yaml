@@ -1,8 +1,8 @@
 # Risk configuration for the autonomous trading agent.
 # The trade-cycle skill MUST read this file first, every cycle, before doing
 # anything else. If `enabled: false`, or the circuit breaker has tripped, the
-# skill halts immediately and does not call any Phantom MCP write tool
-# (buy_token, transfer_tokens, send_solana_transaction, portfolio_rebalance).
+# skill halts immediately and does not call kraken/propose_order.py with
+# --execute (or any other Kraken private/order-placing endpoint).
 
 # ---- Kill switch -----------------------------------------------------------
 # Flip this to false (or delete the file) to stop all autonomous trading.
@@ -10,25 +10,28 @@
 enabled: true
 
 # ---- Capital ----------------------------------------------------------------
-# There is no fixed minimum or required amount -- fund the wallet with
+# There is no fixed minimum or required amount -- fund the account with
 # whatever you actually intend to risk. starting_capital_usd is auto-detected
-# from the wallet's real balance the first time trade-cycle runs (see
-# .claude/skills/trade-cycle/SKILL.md step 2) and persisted to
-# state/starting_capital.json so later P&L swings don't reset the baseline.
-# Leave this null -- every dollar cap below (max_position_usd,
+# from the Kraken account's real USD + mark-to-market balance the first time
+# trade-cycle runs (see .claude/skills/trade-cycle/SKILL.md step 2) and
+# persisted to state/starting_capital.json so later P&L swings don't reset
+# the baseline. Leave this null -- every dollar cap below (max_position_usd,
 # circuit_breaker_floor_usd, max_daily_volume_usd) is computed as a
 # percentage of whatever that turns out to be (see each field's *_pct
-# sibling), not hardcoded to any specific number like $50.
+# sibling), not hardcoded to any specific number.
 starting_capital_usd: null
-network: "solana:mainnet"
+network: "kraken"
 
 # ---- Asset classes in scope --------------------------------------------------
-# Solana spot only for now. EVM spot and Hyperliquid perps are intentionally
-# NOT enabled yet (deliberate scope decision -- revisit later).
+# Kraken spot only. Margin and futures are intentionally NOT enabled --
+# leverage means a position can lose more than it's sized at (liquidation),
+# which breaks the assumption every cap below is built on (a spot loss
+# floors out at 0%). Revisit only as an explicit, separate decision, not a
+# config toggle.
 asset_classes:
-  solana_spot: {enabled: true}
-  evm_spot: {enabled: false}
-  hyperliquid_perps: {enabled: false}
+  kraken_spot: {enabled: true}
+  kraken_margin: {enabled: false}
+  kraken_futures: {enabled: false}
 
 # ---- Position sizing ---------------------------------------------------------
 # Small accounts lose an outsized share of capital to swap fees + price impact
@@ -66,9 +69,12 @@ max_daily_volume_usd_pct: 0.80   # 80% of actual starting capital
 min_hours_between_trades_same_token: 4
 
 # ---- Execution quality --------------------------------------------------------
-max_slippage_bps: 100            # 1.0% max slippage on any swap
-min_liquidity_usd: 250000        # never trade a token with less on-chain liquidity than this
-max_price_impact_bps: 150        # abort if the quoted price impact exceeds this
+max_slippage_bps: 100             # 1.0% max slippage on any market order (a limit order can be used instead if
+                                   # a pair's spread is close to this)
+min_24h_volume_usd: 1000000       # never trade a pair with less Kraken 24h volume than this -- matches
+                                   # config/discovery.yaml's safety.min_24h_volume_usd; keep the two in sync
+max_spread_bps: 50                # abort if the current bid/ask spread exceeds this -- matches
+                                   # config/discovery.yaml's safety.max_spread_bps
 
 # ---- Stop loss / take profit (per position) ----------------------------------
 stop_loss_pct: 0.15              # exit a position down 15% from entry
@@ -76,9 +82,9 @@ take_profit_pct: 0.35            # take profit at +35% from entry
 trailing_stop_pct: 0.12          # once in profit, trail a stop 12% below the peak
 
 # ---- Circuit breaker (portfolio-level) ----------------------------------------
-# If total portfolio value (SOL + all token positions, mark-to-market in USD)
-# falls to or below this floor, the agent must trip the breaker: sell down to
-# stables/SOL is NOT automatic (avoid panic-selling into a wick), but all new
+# If total portfolio value (USD cash + all open positions, mark-to-market in
+# USD) falls to or below this floor, the agent must trip the breaker: sell
+# down to cash is NOT automatic (avoid panic-selling into a wick), but all new
 # entries stop and the human must be notified. Record the trip in
 # state/circuit_breaker.json and refuse to trade until enabled is toggled off
 # and back on by a human AND the breaker file is cleared.
@@ -93,24 +99,28 @@ circuit_breaker_daily_loss_pct: 0.25   # or a >25% drawdown in a single UTC day
 # the regime filter. See backtest/strategies.py's regime() for the same idea
 # applied per-asset (used by the adaptive_ensemble strategy).
 regime_filter_enabled: true
-regime_reference_coin: "bitcoin"
+regime_reference_pair: "XBTUSD"   # Kraken pair (was a CoinGecko coin id under the old Solana pipeline) --
+                                   # fetched via kraken/client.py's ohlc(), no CoinGecko/API-key dependency
 regime_sma_window_days: 30
 
 # ---- Correlation / concentration guardrails ---------------------------------------
-max_non_stable_exposure_fraction: 0.70   # keep some USDC buffer at all times
-max_emerging_tier_positions: 2           # "emerging" tier includes memecoins -- in scope, capped for correlated-liquidity-loss risk, not on principle
-max_same_ecosystem_positions: 3          # e.g. don't hold 3 different tokens that all just track the same underlying beta
+max_non_stable_exposure_fraction: 0.70   # keep some USD cash buffer at all times
+max_emerging_tier_positions: 2           # "emerging" tier includes lower-cap/lower-volume pairs -- in scope, capped for correlated-liquidity-loss risk, not on principle
+max_same_ecosystem_positions: 3          # e.g. don't hold 3 different assets that all just track the same underlying beta
 
-# ---- Token discovery & safety gate ----------------------------------------------
-# There is no hand-maintained token list. A token is only ever tradeable if:
-#   (a) it's SOL or USDC (config/core_assets.yaml), OR
+# ---- Pair discovery & safety gate ----------------------------------------------
+# There is no hand-maintained pair list. A pair is only ever tradeable if:
+#   (a) it's USD itself (config/core_assets.yaml), OR
 #   (b) it was returned as `"eligible": true` by the most recent
 #       research/discover_candidates.py run (see config/discovery.yaml for the
-#       thresholds it enforces -- liquidity, holder count, organic trading
-#       volume, mint/freeze authority, pool age, RugCheck rug-history check),
-#       AND it is not on config/discovery.yaml's `denylist`.
+#       thresholds it enforces -- 24h volume, bid/ask spread, Kraken's own
+#       "online" tradability status), AND it is not on
+#       config/discovery.yaml's `denylist`.
 # New candidates that fail discovery are logged as rejected (with the
 # specific reason) in the journal, never traded. See docs/STRATEGY.md
-# "Autonomous discovery" for the full reasoning and a real worked example.
+# "Autonomous discovery" for the full reasoning.
 require_discovery_pass: true
-max_discovery_result_age_hours: 6   # re-run discovery if the latest research/results/discovery_*.json is older than this
+max_discovery_result_age_hours: 2   # re-run discovery if the latest research/results/discovery_*.json is older
+                                     # than this -- Kraken's public data (unlike the old RugCheck-dependent
+                                     # pipeline) is cheap enough that this mostly just avoids redundant calls
+                                     # within a fast loop cadence, not a rate-limit necessity.

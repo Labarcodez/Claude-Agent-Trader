@@ -112,6 +112,88 @@ class TestVolatilityBreakout(unittest.TestCase):
         self.assertEqual(strat.volatility_breakout(closes, len(closes) - 1, {}), "hold")
 
 
+class TestEmaSeries(unittest.TestCase):
+    def test_none_when_insufficient_data(self):
+        self.assertIsNone(strat.ema_series([1.0, 2.0], 5))
+
+    def test_seeds_first_value_with_sma(self):
+        series = strat.ema_series([1.0, 2.0, 3.0], 3)
+        self.assertAlmostEqual(series[0], 2.0)
+
+    def test_series_length_matches_input_minus_seed_window_plus_one(self):
+        values = [float(i) for i in range(10)]
+        series = strat.ema_series(values, 3)
+        self.assertEqual(len(series), len(values) - 3 + 1)
+
+    def test_tracks_a_steady_ramp_upward(self):
+        values = [float(i) for i in range(20)]
+        series = strat.ema_series(values, 5)
+        self.assertGreater(series[-1], series[0])
+
+
+class TestMacd(unittest.TestCase):
+    def test_none_when_insufficient_data(self):
+        self.assertIsNone(strat.macd([1.0] * 10, fast=12, slow=26, signal=9))
+
+    def test_flat_series_has_zero_macd_line(self):
+        result = strat.macd([100.0] * 60)
+        self.assertIsNotNone(result)
+        macd_line, signal_line = result
+        self.assertAlmostEqual(macd_line, 0.0)
+        self.assertAlmostEqual(signal_line, 0.0)
+
+    def test_sustained_uptrend_has_positive_macd_line(self):
+        closes = [100.0 + i for i in range(60)]
+        macd_line, _ = strat.macd(closes)
+        self.assertGreater(macd_line, 0)
+
+    def test_sustained_downtrend_has_negative_macd_line(self):
+        closes = [200.0 - i for i in range(60)]
+        macd_line, _ = strat.macd(closes)
+        self.assertLess(macd_line, 0)
+
+
+class TestMacdCrossover(unittest.TestCase):
+    def test_hold_when_insufficient_history(self):
+        self.assertEqual(strat.macd_crossover([100.0] * 10, 9, {}), "hold")
+
+    def test_hold_on_perfectly_flat_series(self):
+        closes = [100.0] * 60
+        for i in range(len(closes)):
+            self.assertEqual(strat.macd_crossover(closes, i, {}), "hold")
+
+    def test_buy_appears_on_a_sharp_sustained_reversal_upward(self):
+        # flat, then a real declining stretch, then a sharp sustained ramp --
+        # the MACD line must eventually cross back above its signal line
+        closes = [100.0] * 30 + [100 - i for i in range(20)] + [80 + i * 4 for i in range(20)]
+        signals = [strat.macd_crossover(closes, i, {}) for i in range(len(closes))]
+        self.assertIn("buy", signals)
+
+
+class TestBollingerMeanReversion(unittest.TestCase):
+    def test_hold_when_insufficient_history(self):
+        self.assertEqual(strat.bollinger_mean_reversion([100.0] * 5, 4, {}, window=20), "hold")
+
+    def test_hold_on_perfectly_flat_series(self):
+        # zero stdev -- no meaningful band, must not divide by zero or misfire
+        closes = [100.0] * 25
+        self.assertEqual(strat.bollinger_mean_reversion(closes, len(closes) - 1, {}), "hold")
+
+    def test_buy_when_price_drops_below_lower_band(self):
+        # a calm, tight range, then one sharp single-bar drop far below it --
+        # the drop bar itself should read as oversold relative to the tight band
+        closes = [100.0, 100.5, 99.5, 100.2, 99.8] * 4 + [80.0]
+        self.assertEqual(strat.bollinger_mean_reversion(closes, len(closes) - 1, {}, window=20), "buy")
+
+    def test_sell_when_price_spikes_above_upper_band(self):
+        closes = [100.0, 100.5, 99.5, 100.2, 99.8] * 4 + [120.0]
+        self.assertEqual(strat.bollinger_mean_reversion(closes, len(closes) - 1, {}, window=20), "sell")
+
+    def test_hold_within_the_bands(self):
+        closes = [100.0, 100.5, 99.5, 100.2, 99.8] * 4 + [100.1]
+        self.assertEqual(strat.bollinger_mean_reversion(closes, len(closes) - 1, {}, window=20), "hold")
+
+
 class TestRegime(unittest.TestCase):
     def test_ranging_on_flat_series(self):
         closes = [100.0] * 40

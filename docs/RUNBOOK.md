@@ -2,13 +2,10 @@
 
 ## First-time setup
 
-1. Follow `docs/PHANTOM_MCP_SETUP.md` end to end (local machine, browser
-   auth, fund the agent's wallet with whatever amount you intend to risk --
-   there's no fixed minimum).
-2. Verify SOL and USDC's mint addresses in `config/core_assets.yaml` against
-   an authoritative source before trusting them -- these are the only two
-   tokens not covered by live discovery's automated checks.
-3. Try discovery on its own first, to see the safety pipeline working before
+1. Follow `docs/KRAKEN_SETUP.md` end to end (create a Kraken account, fund
+   it with whatever amount you intend to risk -- there's no fixed minimum --
+   create a scoped API key, fill in `.env`).
+2. Try discovery on its own first, to see the safety pipeline working before
    any money is at stake:
    ```
    python3 research/discover_candidates.py
@@ -17,8 +14,8 @@
    -- if the thresholds in `config/discovery.yaml` feel too strict or too
    loose for your taste, adjust them there (and keep
    `research/discover_candidates.py`'s CLI defaults in sync -- see that
-   file's docstring).
-4. Backtest everything currently eligible in one pass, with walk-forward to
+   file's docstring). No API key needed for this step.
+3. Backtest everything currently eligible in one pass, with walk-forward to
    check for overfitting rather than trusting a single in-sample run:
    ```
    python3 backtest/backtest_all.py
@@ -26,22 +23,23 @@
    Only strategies with a non-negative **out-of-sample** result and low
    overfit risk should be relied on live (`docs/STRATEGY.md` "Judging a
    backtest"). Read the drawdown column too, not just returns -- expect
-   emerging-tier tokens to show much bigger drawdowns than SOL/BTC even when
+   emerging-tier pairs to show much bigger drawdowns than BTC/ETH even when
    "winning"; that's the evidence behind the tier sizing in
-   `config/discovery.yaml`, not just a theoretical caution.
-5. **Paper trade** before ever running the real thing -- this can even be
-   done in a session with no Phantom MCP connection at all (see "Paper
+   `config/discovery.yaml`, not just a theoretical caution. No API key
+   needed for this step either.
+4. **Paper trade** before ever running the real thing -- this can even be
+   done in a session with no Kraken API key configured at all (see "Paper
    trading before going live" below).
-6. Run one real `trade-cycle` manually (ask Claude Code, in this repo, to
+5. Run one real `trade-cycle` manually (ask Claude Code, in this repo, to
    run the `trade-cycle` skill once) and read the journal entry it produces
    in `journal/trades.jsonl` before automating anything.
 
 ## Paper trading before going live
 
 `paper_trading/run_paper_cycle.py` runs the exact same discovery, regime
-filter, and strategy code the live agent uses, against real live market
-data, but simulates fills against `state/paper_portfolio.json` instead of
-calling any Phantom MCP write tool. No real money, no Phantom connection
+filter, and strategy code the live agent uses, against real live Kraken
+market data, but simulates fills against `state/paper_portfolio.json`
+instead of placing any real order. No real money, no Kraken API key
 required.
 
 ```
@@ -66,8 +64,24 @@ A short paper-trading run is weak evidence, the same way a short backtest
 window is -- treat a few days of paper cycles as "the pipeline didn't
 obviously break," not as proof of an edge. See
 `.claude/skills/paper-trade-cycle/SKILL.md` for what it simplifies vs. live
-trading (no real swap quote/slippage check, no daily cadence caps) before
-over-trusting its results.
+trading (no real order validation beyond discovery's own screening, no
+daily cadence caps) before over-trusting its results.
+
+## Reviewing performance (learning over time)
+
+Periodically -- weekly, or every ~50-100 cycles -- ask Claude to run
+`.claude/skills/review-trading-performance`, or directly:
+```
+python3 scripts/analyze_journal.py
+```
+This breaks down closed trades by exit reason, tier, strategy, and pair,
+and surfaces which `not_traded` rejection reasons dominate -- the same
+"mine the journal" habit that's already found real bugs in this project
+before (see git history / code comments for examples). It never edits
+`config/risk.yaml` or `config/discovery.yaml` on its own -- it turns a
+genuine, sufficiently-sampled pattern into a specific proposed change for
+you to approve, the same review discipline as any other config change
+(CLAUDE.md rule 7).
 
 ## Running autonomously
 
@@ -84,8 +98,11 @@ adds cost without adding information. Every 4-12 hours is more sensible for
 a small account than every few minutes.
 
 Alternatively, use a Claude Code Remote Routine / cron trigger bound to a
-session running on a machine with Phantom already authenticated, if you want
-it to run without you keeping a local session open.
+session with `KRAKEN_API_KEY`/`KRAKEN_API_SECRET` set, if you want it to
+run without you keeping a local session open -- unlike the old Phantom
+setup, this works from a cloud/remote session too (Kraken's API needs no
+local browser), though live execution still always requires a human to run
+the `--execute` step (CLAUDE.md rule 1).
 
 ## Monitoring
 
@@ -93,17 +110,16 @@ it to run without you keeping a local session open.
 - `journal/paper_trades.jsonl` / `state/paper_portfolio.json` -- same, for
   the paper-trading simulation (never mix these up with the real ones).
 - `state/circuit_breaker.json` -- current trip status and peak portfolio value.
-- Ask Claude at any time: "check the trading wallet status" -- it should read
-  the journal + circuit breaker file + live Phantom balances and summarize.
+- Ask Claude at any time: "check the trading account status" -- it should
+  read the journal + circuit breaker file + live Kraken balances
+  (`kraken.client.balance()`) and summarize.
 
 ## Stopping / pausing
 
 - **Immediate stop**: set `enabled: false` in `config/risk.yaml`. The
   `trade-cycle` skill checks this first, every cycle, before touching the
-  wallet.
+  account.
 - **Stop the loop**: cancel the `/loop` or Routine driving `trade-cycle`.
-- The agent's wallet is separate from your personal wallet (see setup doc),
-  so stopping the agent never affects anything else in your Phantom account.
 
 ## Recovering from a circuit breaker trip
 
@@ -125,7 +141,7 @@ resuming:
 
 ## Withdrawing funds
 
-Ask Claude to use the Phantom MCP transfer tool to send SOL/tokens from the
-agent's wallet to your personal wallet address at any time -- this doesn't
-require the trading loop to be stopped first, but stopping it
-(`enabled: false`) first avoids a race with an in-flight autonomous trade.
+Withdrawals are always something you do yourself, directly in Kraken's own
+web UI or app -- the API key this project uses should never have Withdraw
+Funds permission enabled in the first place (see `docs/KRAKEN_SETUP.md`), so
+there's no agent-driven withdrawal path to ask for here by design.

@@ -1,75 +1,112 @@
 #!/usr/bin/env python3
-"""Dynamic Solana token discovery + automated safety scoring, stdlib only.
+"""Kraken spot-pair discovery + safety scoring, stdlib only (+ kraken/client.py).
 
-Replaces a hand-maintained watchlist: pulls live candidates from Jupiter's
-Tokens API v2 (real trading interest, trending, newest pools), which already
-returns per-token on-chain audit data (mint/freeze authority, top-holder
-concentration, an "organic score" that filters out wash-traded/bot volume,
-and first-pool creation time for age) at zero extra cost -- then
-cross-checks survivors against RugCheck.xyz for one thing Jupiter's data
-doesn't cover: whether the mint has already been confirmed as a rug pull.
+Replaces the earlier Solana/Jupiter/RugCheck pipeline (see git history) now
+that this project trades Kraken instead -- see docs/KRAKEN_SETUP.md and the
+plan recorded 2026-08-25 for why. The safety model shifts accordingly:
+Kraken already reviews and vets every asset before listing it (delisting
+risk, not rug-pull risk), so there is no on-chain audit data, no
+mint/freeze-authority check, and no RugCheck-style "is this a confirmed
+scam" cross-check to run here -- those questions don't apply to an
+already-listed, centralized-exchange pair the way they did to an arbitrary
+Solana contract address. What DOES still need checking on Kraken is
+tradability and exit liquidity: is the pair actually online, is there
+enough 24h volume to get back out of a position without moving the price
+yourself, and is the bid/ask spread tight enough that entering and exiting
+doesn't hand away the edge to the spread alone.
 
-All data sources are free, public, and require no API key -- but they're
-someone else's infrastructure with real rate limits, so this script is
-deliberately conservative about request volume: RugCheck is only called for
-candidates that already pass every check computed from Jupiter's own
-response, and everything backs off and retries once on a 429 rather than
-hammering the endpoint.
+Kraken's AssetPairs + Ticker endpoints are both public (no API key), free,
+and return every field this script needs in two bulk calls -- no
+per-candidate secondary lookups (contrast the old pipeline's per-candidate
+RugCheck call), so there's no rate-limit-driven need to sample a subset of
+the universe or rotate through it across cycles: every USD-quoted pair
+Kraken lists (a few hundred, not a few thousand) is evaluated every run.
 
-See config/discovery.yaml for the human-readable version of these
-thresholds (keep the two in sync by hand -- this script does not parse that
-file, to stay dependency-free) and docs/STRATEGY.md "Autonomous discovery"
-for the reasoning and the empirical notes on what these APIs actually
-return (some fields are less trustworthy than they look -- documented
-there).
+The one thing Kraken doesn't expose at all is market cap (used for
+blue_chip/established tier classification) -- that still comes from
+CoinGecko's public markets endpoint, looked up in bulk for a small curated
+list of Kraken-listed majors (KRAKEN_TO_COINGECKO_ID below), not per
+candidate.
 
 Usage:
     python3 research/discover_candidates.py
-    python3 research/discover_candidates.py --max-candidates 15 --min-liquidity-usd 300000
+    python3 research/discover_candidates.py --min-24h-volume-usd 500000 --max-spread-bps 50
 """
 from __future__ import annotations
 import argparse
 import json
-import random
 import sys
 import time
-import urllib.request
 import urllib.error
+import urllib.request
 from datetime import datetime, timezone
 from pathlib import Path
 
-# Discovered token symbols can contain arbitrary Unicode (scam/spam tokens routinely
-# use lookalike characters); Windows consoles default to a narrow codepage (cp1252)
-# that can't encode most of it, which otherwise crashes this script mid-run -- after
-# the expensive discovery/RugCheck work is already done -- on nothing but a print().
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+from kraken import client as kc  # noqa: E402
+
+# Discovered pair/asset names are always plain ASCII on Kraken (unlike the old
+# Solana pipeline's arbitrary on-chain symbols), but keep this guard anyway --
+# cheap insurance against the exact class of Windows-console crash documented
+# in git history, and harmless if it never triggers here.
 for _stream in (sys.stdout, sys.stderr):
     if hasattr(_stream, "reconfigure"):
         _stream.reconfigure(encoding="utf-8", errors="replace")
 
-JUPITER_BASE = "https://api.jup.ag/tokens/v2"
-RUGCHECK_BASE = "https://api.rugcheck.xyz/v1"
-DEXSCREENER_BASE = "https://api.dexscreener.com/latest/dex"
+COINGECKO_BASE = "https://api.coingecko.com/api/v3"
 USER_AGENT = "claude-agent-trader-discovery/1.0"
 
 RESULTS_DIR = Path(__file__).parent / "results"
+DEFAULT_DISCOVERY_HISTORY_PATH = Path(__file__).parent.parent / "state" / "discovery_history.json"
+MAX_HISTORY_SNAPSHOTS_PER_MINT = 20  # kept as a rolling trend window, same reasoning as before
 
-# Native SOL + Circle's Solana USDC -- settlement/base assets, not discovery
-# candidates. Kept here (not in discovery output) so they're never
-# accidentally excluded *or* re-evaluated as if they needed due diligence.
-CORE_ASSET_MINTS = {
-    "So11111111111111111111111111111111111111112",  # SOL
-    "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v",  # USDC
+# Kraken base-asset altname -> CoinGecko coin id, for the market-cap lookup
+# classify_tier() needs (Kraken's own API has no market-cap field at all).
+# Deliberately a curated, hand-checked list rather than an auto-derived one --
+# Kraken's asset codes (e.g. "XBT" for Bitcoin, "XETH" for Ethereum) don't
+# follow one consistent convention, and a wrong auto-mapping would silently
+# tier-misclassify a real position. Anything not listed here falls back to
+# "emerging" in classify_tier() -- the same conservative-default posture the
+# old pipeline used for a token with no reported mcap.
+KRAKEN_TO_COINGECKO_ID: dict[str, str] = {
+    "XBT": "bitcoin", "ETH": "ethereum", "SOL": "solana", "XRP": "ripple",
+    "ADA": "cardano", "DOGE": "dogecoin", "XDG": "dogecoin",  # Kraken's own altname for Dogecoin is XDG, not DOGE
+    "LTC": "litecoin", "DOT": "polkadot",
+    "LINK": "chainlink", "MATIC": "matic-network", "POL": "matic-network",
+    "AVAX": "avalanche-2", "ATOM": "cosmos", "UNI": "uniswap", "AAVE": "aave",
+    "BCH": "bitcoin-cash", "ETC": "ethereum-classic", "XLM": "stellar",
+    "ALGO": "algorand", "FIL": "filecoin", "SHIB": "shiba-inu", "NEAR": "near",
+    "APT": "aptos", "ARB": "arbitrum", "OP": "optimism", "SUI": "sui",
+    "INJ": "injective-protocol", "RENDER": "render-token", "TIA": "celestia",
+    "PEPE": "pepe", "TRX": "tron", "XMR": "monero", "XTZ": "tezos",
+    "EOS": "eos", "MANA": "decentraland", "SAND": "the-sandbox", "GRT": "the-graph",
+    "CRV": "curve-dao-token", "MKR": "maker", "COMP": "compound-governance-token",
+    "SNX": "havven", "LDO": "lido-dao", "FET": "fetch-ai", "WIF": "dogwifcoin",
+    "BONK": "bonk", "JUP": "jupiter-exchange-solana", "PYTH": "pyth-network",
 }
 
+# Kraken keeps dark-pool pairs (hidden order book, invite-only liquidity) at
+# the same asset pair with a ".d" suffix (e.g. "XBTUSD.d") -- these aren't
+# accessible the way a normal listed pair is, and must never be treated as
+# an ordinary discovery candidate.
+DARK_POOL_SUFFIX = ".d"
 
-# 429 (rate limited) and 502/503/504 (bad gateway/unavailable/gateway
-# timeout) are all transient, worth retrying -- unlike a definitive client
-# error (400/401/403/404), which retrying can't fix. Observed live:
-# RugCheck.xyz returned 502 for two otherwise-clean candidates in the same
-# cycle; without a retry here, evaluate_candidate()'s fail-safe design
-# correctly rejects them rather than trading unconfirmed -- but "reject a
-# legitimate candidate over one brief upstream hiccup" is a worse outcome
-# than "retry a couple times first" when the fix is this cheap.
+# Fiat currencies (Kraken prefixes every fiat asset code with "Z" -- ZUSD,
+# ZEUR, ZGBP, ...) and USD-pegged stablecoins quoted against USD aren't
+# meaningful trading candidates -- "buying" USDTUSD is just holding a dollar
+# under a different name, the same reason the old Solana pipeline excluded
+# SOL/USDC as settlement assets rather than candidates (config/core_assets.yaml).
+# Excluded by base asset code, checked before the KRAKEN_TO_COINGECKO_ID
+# lookup/stripping logic below.
+EXCLUDED_BASE_ASSETS = {
+    "ZEUR", "ZGBP", "ZJPY", "ZCAD", "ZAUD", "ZCHF", "ZUSD",
+    "USDT", "USDC", "DAI", "PYUSD", "USDG", "TUSD", "USDS", "RLUSD", "GUSD", "EURT",
+}
+
+# 429 (rate limited) and 502/503/504 are transient and worth retrying; a
+# definitive client error (400/401/403/404) isn't. Mirrors
+# kraken/client.py's RETRYABLE_HTTP_CODES for this file's one remaining
+# non-Kraken upstream (CoinGecko, for market caps only).
 RETRYABLE_HTTP_CODES = {429, 502, 503, 504}
 
 
@@ -90,283 +127,259 @@ def _get_json(url: str, retries: int = 3, backoff: float = 2.0):
             last_err = e
             break
         except OSError as e:
-            # Broad on purpose: URLError and TimeoutError are both OSError
-            # subclasses (HTTPError too, but it's caught by the more specific
-            # clause above first), so this also catches raw connection-level
-            # failures -- confirmed live when RugCheck.xyz reset the
-            # connection mid-request and this environment's urllib raised a
-            # bare http.client.RemoteDisconnected instead of wrapping it in
-            # URLError. Un-widened, that crashed the entire cycle with no
-            # journal entry instead of retrying like every other transient
-            # failure here.
+            # Broad on purpose -- see kraken/client.py's _request() for why
+            # (confirmed live elsewhere in this project: a bare
+            # http.client.RemoteDisconnected instead of a wrapped URLError).
             last_err = e
             time.sleep(backoff)
     print(f"  ! request failed: {url} ({last_err})", file=sys.stderr)
     return None
 
 
-def fetch_jupiter_category(category: str, interval: str, limit: int) -> list[dict]:
-    return _get_json(f"{JUPITER_BASE}/{category}/{interval}?limit={limit}") or []
-
-
-def fetch_jupiter_recent(limit: int) -> list[dict]:
-    return _get_json(f"{JUPITER_BASE}/recent?limit={limit}") or []
-
-
-def fetch_jupiter_tag(tag: str) -> list[dict]:
-    """Verified live: query=verified alone returns 2,561 tokens -- Jupiter's
-    full verified-token list, not a momentum snapshot like the toporganicscore/
-    toptrending/recent sources above. Those three only ever surface whatever
-    happens to be trending/organic/newest *right now*, so a legitimate,
-    established-but-not-currently-hot token could never be discovered at all
-    regardless of how many cycles run. This is the actual breadth fix -- the
-    max_candidates rotation (see paper_trading/run_paper_cycle.py) is what
-    makes evaluating a pool this size safe without hammering RugCheck."""
-    return _get_json(f"{JUPITER_BASE}/tag?query={tag}") or []
-
-
-def fetch_rugcheck_report(mint: str) -> dict | None:
-    return _get_json(f"{RUGCHECK_BASE}/tokens/{mint}/report")
-
-
-def fetch_dexscreener_best_solana_pair(mint: str) -> dict | None:
-    data = _get_json(f"{DEXSCREENER_BASE}/tokens/{mint}")
-    pairs = [p for p in (data or {}).get("pairs") or [] if p.get("chainId") == "solana"]
-    if not pairs:
-        return None
-    return max(pairs, key=lambda p: (p.get("liquidity") or {}).get("usd", 0) or 0)
+def fetch_market_caps_usd(coingecko_ids: list[str]) -> dict[str, float]:
+    """{coingecko_id: market_cap_usd} in as few CoinGecko calls as possible --
+    the /coins/markets endpoint accepts a comma-separated ids list, so this
+    is one call for the whole KRAKEN_TO_COINGECKO_ID table regardless of how
+    many candidates this cycle actually needs tiered."""
+    if not coingecko_ids:
+        return {}
+    ids_param = ",".join(dict.fromkeys(coingecko_ids))
+    data = _get_json(f"{COINGECKO_BASE}/coins/markets?vs_currency=usd&ids={ids_param}") or []
+    return {row["id"]: row.get("market_cap") or 0 for row in data if isinstance(row, dict) and row.get("id")}
 
 
 def gather_candidates(args) -> dict[str, dict]:
-    """Returns {mint: jupiter_token_data}, deduped across sources, core assets excluded."""
+    """Returns {pair_name: merged_asset_pair_and_ticker_data}. Every
+    online, USD-quoted, non-dark-pool pair Kraken lists -- no sampling, no
+    per-source dedup needed (AssetPairs is already the deduped universe)."""
+    pairs_info = kc.asset_pairs()
+    usd_pair_names = [
+        name for name, info in pairs_info.items()
+        if info.get("status") == "online"
+        and info.get("quote") in ("ZUSD", "USD")
+        and not name.endswith(DARK_POOL_SUFFIX)
+        and info.get("base") not in EXCLUDED_BASE_ASSETS
+    ]
+    tickers = kc.ticker(usd_pair_names)
+
     candidates: dict[str, dict] = {}
-    # 8 back-to-back Jupiter calls (2 organic + 2 trending + 2 traded + 1
-    # recent + 1 verified) with no spacing was hitting 429s on 2 of them most
-    # cycles -- always recovered by _get_json()'s own retry, but at a real
-    # cost (two live cycles took ~100s+ each, mostly retry backoff, vs the
-    # usual ~12-15s). A brief pause between calls spreads the load instead of
-    # bursting it, the same fix that already worked for the pricing call in
-    # paper_trading/run_paper_cycle.py.
-    first_call = True
-
-    def _paced_call(fn, *fn_args):
-        nonlocal first_call
-        if not first_call:
-            time.sleep(0.5)
-        first_call = False
-        return fn(*fn_args)
-
-    if not args.no_organic:
-        for interval in ("6h", "24h"):
-            for tok in _paced_call(fetch_jupiter_category, "toporganicscore", interval, args.limit_per_source):
-                candidates.setdefault(tok["id"], tok)
-
-    if not args.no_trending:
-        for interval in ("1h", "6h"):
-            for tok in _paced_call(fetch_jupiter_category, "toptrending", interval, args.limit_per_source):
-                candidates.setdefault(tok["id"], tok)
-
-    if not args.no_traded:
-        for interval in ("6h", "24h"):
-            for tok in _paced_call(fetch_jupiter_category, "toptraded", interval, args.limit_per_source):
-                candidates.setdefault(tok["id"], tok)
-
-    if not args.no_recent:
-        for tok in _paced_call(fetch_jupiter_recent, args.limit_per_source):
-            candidates.setdefault(tok["id"], tok)
-
-    if not args.no_verified:
-        for tok in _paced_call(fetch_jupiter_tag, "verified"):
-            candidates.setdefault(tok["id"], tok)
-
-    for mint in CORE_ASSET_MINTS:
-        candidates.pop(mint, None)
-
+    for name in usd_pair_names:
+        t = tickers.get(name)
+        if not t:
+            continue  # Ticker didn't return this pair (rare transient gap) -- skip rather than evaluate on partial data
+        info = pairs_info[name]
+        ask = float(t["a"][0])
+        bid = float(t["b"][0])
+        last = float(t["c"][0])
+        vol_24h_base = float(t["v"][1])
+        vwap_24h = float(t["p"][1])
+        mid = (ask + bid) / 2 if (ask and bid) else last
+        candidates[name] = {
+            "pair": name,
+            "base": info.get("base"),
+            "altname": info.get("altname"),
+            "wsname": info.get("wsname"),
+            "status": info.get("status"),
+            "price_usd": mid,
+            "last_trade_price_usd": last,
+            "ask_usd": ask,
+            "bid_usd": bid,
+            "volume_24h_base": vol_24h_base,
+            "volume_24h_usd": vol_24h_base * vwap_24h if vwap_24h else vol_24h_base * mid,
+            "spread_bps": ((ask - bid) / mid) * 10_000 if mid else None,
+        }
     return candidates
 
 
-def _pool_age_hours(first_pool: dict | None) -> float | None:
-    if not first_pool or not first_pool.get("createdAt"):
-        return None
-    try:
-        created = datetime.fromisoformat(str(first_pool["createdAt"]).replace("Z", "+00:00"))
-    except (ValueError, TypeError, AttributeError):
-        # Fail-safe, not fail-crash: a malformed/unexpected createdAt shape from
-        # Jupiter's API (e.g. a non-string value) must not take down the whole
-        # discovery run over one candidate -- treat it the same as "no age
-        # reported" (evaluate_candidate() then rejects that candidate on the
-        # "can't confirm token age" reason, same as a genuinely missing field).
-        return None
-    return (datetime.now(timezone.utc) - created).total_seconds() / 3600
+def _kraken_base_altname(base_code: str) -> str:
+    """Kraken's raw asset codes carry a legacy "X"/"Z" prefix for some
+    assets (e.g. "XXBT" for Bitcoin, "ZUSD" for US Dollar) that its own
+    altname strips (e.g. "XBT"). KRAKEN_TO_COINGECKO_ID is keyed by altname,
+    so this normalizes the common-prefix cases without needing a live
+    Assets API call for every base code -- Kraken's own convention is
+    documented as: strip a leading "X" or "Z" if the remaining string is
+    still a recognizable code. Falls back to the raw code unchanged if
+    stripping doesn't produce anything in the table (see classify_tier()'s
+    fallback to "emerging" either way)."""
+    if base_code in KRAKEN_TO_COINGECKO_ID:
+        return base_code
+    if len(base_code) > 3 and base_code[0] in ("X", "Z"):
+        stripped = base_code[1:]
+        if stripped in KRAKEN_TO_COINGECKO_ID:
+            return stripped
+    return base_code
 
 
-def classify_tier(mcap: float, holder_count: int, is_verified: bool, args) -> str:
-    if mcap >= args.blue_chip_mcap_usd and holder_count >= args.blue_chip_holder_count and is_verified:
+def classify_tier(mcap_usd: float, volume_24h_usd: float, args) -> str:
+    """Kraken has no holder-count or on-chain-verification signal, so tiering
+    here rests on two things a centralized exchange DOES report cleanly:
+    market cap (via CoinGecko, see fetch_market_caps_usd) and this pair's
+    own 24h USD volume (via Kraken's Ticker, already in `data` before this
+    is called) -- both must clear their tier's bar, mirroring the old
+    pipeline's "mcap AND holder_count" two-factor requirement."""
+    if mcap_usd >= args.blue_chip_mcap_usd and volume_24h_usd >= args.blue_chip_volume_usd:
         return "blue_chip"
-    if mcap >= args.established_mcap_usd and holder_count >= args.established_holder_count:
+    if mcap_usd >= args.established_mcap_usd and volume_24h_usd >= args.established_volume_usd:
         return "established"
-    return "emerging"  # includes memecoins and other newer/smaller tokens that still pass every safety check
+    return "emerging"  # everything that passes safety but isn't large/liquid enough yet
 
 
-def evaluate_candidate(mint: str, tok: dict, args) -> dict:
-    """Two-stage check: (1) everything computable from Jupiter's own response
-    for free, (2) RugCheck's `rugged` flag -- but only spent on candidates
-    that already survive stage 1, to keep request volume down."""
+def load_discovery_history(path: Path = DEFAULT_DISCOVERY_HISTORY_PATH) -> dict:
+    """Fail-safe, not fail-crash -- see the original pipeline's identical
+    reasoning: a missing/corrupted cache just means trend-tracking restarts
+    this cycle, never a reason to crash a discovery run."""
+    if not path.exists():
+        return {}
+    try:
+        return json.loads(path.read_text(encoding="utf-8"))
+    except (json.JSONDecodeError, OSError, UnicodeDecodeError):
+        return {}
+
+
+def save_discovery_history(history: dict, path: Path = DEFAULT_DISCOVERY_HISTORY_PATH) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp_path = path.with_suffix(".tmp")
+    tmp_path.write_text(json.dumps(history, indent=2), encoding="utf-8")
+    tmp_path.replace(path)  # atomic swap
+
+
+def record_and_compute_trend(pair: str, symbol: str, data: dict, history: dict, now: datetime | None = None) -> dict:
+    """Same shape/purpose as the original pipeline's version, with
+    holder_count/organic_score/liquidity_usd replaced by this venue's own
+    signals: 24h USD volume (growth = more real trading interest) and
+    spread (a narrowing spread over time means the pair is getting easier,
+    not harder, to trade in and out of)."""
+    now = now or datetime.now(timezone.utc)
+    now_iso = now.isoformat()
+    entry = history.setdefault(pair, {"symbol": symbol, "snapshots": []})
+    entry["symbol"] = symbol
+    snapshots = entry["snapshots"]
+
+    trend = {
+        "cycles_seen": len(snapshots) + 1,
+        "first_seen_at": snapshots[0]["ts"] if snapshots else now_iso,
+        "volume_growth_usd_per_hour": None,
+        "spread_bps_delta": None,
+    }
+    if snapshots:
+        baseline = snapshots[0]
+        hours_elapsed = None
+        try:
+            baseline_ts = datetime.fromisoformat(str(baseline.get("ts")))
+            hours_elapsed = (now - baseline_ts).total_seconds() / 3600
+        except (ValueError, TypeError):
+            pass
+        if hours_elapsed and hours_elapsed > 0.05:
+            if baseline.get("volume_24h_usd") is not None and data.get("volume_24h_usd") is not None:
+                trend["volume_growth_usd_per_hour"] = (
+                    data["volume_24h_usd"] - baseline["volume_24h_usd"]
+                ) / hours_elapsed
+        if baseline.get("spread_bps") is not None and data.get("spread_bps") is not None:
+            trend["spread_bps_delta"] = data["spread_bps"] - baseline["spread_bps"]
+
+    snapshots.append({
+        "ts": now_iso,
+        "volume_24h_usd": data.get("volume_24h_usd"),
+        "spread_bps": data.get("spread_bps"),
+    })
+    entry["snapshots"] = snapshots[-MAX_HISTORY_SNAPSHOTS_PER_MINT:]
+    return trend
+
+
+def evaluate_candidate(pair: str, data: dict, args, mcap_usd: float | None = None) -> dict:
+    """Everything computable from Kraken's own AssetPairs+Ticker data --
+    no secondary per-candidate lookup needed (contrast the old pipeline's
+    RugCheck stage). mcap_usd is looked up in bulk by the caller (see
+    main()) and passed in, defaulting to 0 (-> "emerging" tier) for any
+    pair whose base asset isn't in KRAKEN_TO_COINGECKO_ID."""
     reasons_fail: list[str] = []
-    symbol = tok.get("symbol", "?")
-    liquidity = tok.get("liquidity") or 0
-    holders = tok.get("holderCount") or 0
-    # Real circulating mcap only -- NOT fdv. FDV (fully diluted valuation)
-    # counts locked/unvested/unminted supply as if it were already circulating,
-    # so a low-float token can show a huge fdv while its real, tradeable market
-    # cap is tiny. Treating fdv as a mcap stand-in would let such a token
-    # falsely qualify for "established"/"blue_chip" tier sizing (a bigger
-    # position multiplier) when it's actually "emerging"-risk. Missing/zero
-    # mcap defaults to 0, which safely falls through to the "emerging" tier
-    # in classify_tier() below rather than overstating it.
-    mcap = tok.get("mcap") or 0
-    fdv = tok.get("fdv") or 0
-    audit = tok.get("audit") or {}
-    organic_score = tok.get("organicScore")
-    top_holder_pct = audit.get("topHoldersPercentage")
-    pool_age_hours = _pool_age_hours(tok.get("firstPool"))
+    symbol = data.get("altname") or pair
+    volume_24h_usd = data.get("volume_24h_usd") or 0
+    spread_bps = data.get("spread_bps")
+    price = data.get("price_usd") or 0
+    mcap_usd = mcap_usd or 0
 
-    if liquidity < args.min_liquidity_usd:
-        reasons_fail.append(f"liquidity ${liquidity:,.0f} < min ${args.min_liquidity_usd:,.0f}")
-    if holders < args.min_holder_count:
-        reasons_fail.append(f"holderCount {holders} < min {args.min_holder_count}")
-    if organic_score is None:
-        reasons_fail.append("no organicScore reported -- can't confirm real (non-wash-traded) demand")
-    elif organic_score < args.min_organic_score:
-        reasons_fail.append(f"organicScore {organic_score:.1f} < min {args.min_organic_score}")
-    if args.require_mint_renounced and not audit.get("mintAuthorityDisabled"):
-        reasons_fail.append("mint authority not disabled (deployer can still mint new supply)")
-    if args.require_freeze_renounced and not audit.get("freezeAuthorityDisabled"):
-        reasons_fail.append("freeze authority not disabled (deployer can still freeze holder accounts)")
-    if top_holder_pct is not None and top_holder_pct > args.max_top_holder_pct:
-        reasons_fail.append(f"top holder owns {top_holder_pct:.1f}% of supply > max {args.max_top_holder_pct}%")
-    if pool_age_hours is None:
-        reasons_fail.append("no first-pool creation time reported -- can't confirm token age")
-    elif pool_age_hours < args.min_pool_age_hours:
-        reasons_fail.append(f"pool age {pool_age_hours:.1f}h < min {args.min_pool_age_hours}h")
+    if data.get("status") != "online":
+        reasons_fail.append(f"pair status is {data.get('status')!r}, not 'online' -- not currently tradable")
+    if price <= 0:
+        reasons_fail.append("no valid price reported")
+    if volume_24h_usd < args.min_24h_volume_usd:
+        reasons_fail.append(f"24h volume ${volume_24h_usd:,.0f} < min ${args.min_24h_volume_usd:,.0f}")
+    if spread_bps is None:
+        reasons_fail.append("no bid/ask spread reported -- can't confirm exit liquidity")
+    elif spread_bps > args.max_spread_bps:
+        reasons_fail.append(f"spread {spread_bps:.1f}bps > max {args.max_spread_bps:.1f}bps")
 
-    rug_rugged = None
-    rug_risks: list[str] = []
-    if not reasons_fail or args.always_rugcheck:
-        time.sleep(args.request_delay)
-        rug = fetch_rugcheck_report(mint)
-        if rug is None:
-            reasons_fail.append("RugCheck unavailable -- fail-safe reject rather than trade unconfirmed")
-        else:
-            rug_rugged = rug.get("rugged")
-            if rug_rugged:
-                reasons_fail.append("RugCheck flags this mint as an already-confirmed rug")
-            for r in rug.get("risks") or []:
-                if isinstance(r, dict) and str(r.get("level", "")).lower() in ("danger", "critical", "high"):
-                    name = r.get("name") or r.get("description") or str(r)
-                    rug_risks.append(name)
-                    reasons_fail.append(f"RugCheck risk flag: {name}")
-
-    dex_pair = None
-    if args.cross_check_dexscreener and not reasons_fail:
-        time.sleep(args.request_delay)
-        dex_pair = fetch_dexscreener_best_solana_pair(mint)
-        if dex_pair:
-            dex_liq = (dex_pair.get("liquidity") or {}).get("usd", 0) or 0
-            if dex_liq < args.min_liquidity_usd * 0.5:  # allow some divergence between sources before treating it as a red flag
-                reasons_fail.append(f"DexScreener liquidity ${dex_liq:,.0f} diverges sharply below Jupiter's ${liquidity:,.0f}")
-
-    is_verified = bool(tok.get("isVerified")) and audit.get("mintAuthorityDisabled") and audit.get("freezeAuthorityDisabled")
-    tier = classify_tier(mcap, holders, is_verified, args) if not reasons_fail else None
+    tier = classify_tier(mcap_usd, volume_24h_usd, args) if not reasons_fail else None
 
     return {
-        "mint": mint,
+        "pair": pair,
         "symbol": symbol,
         "eligible": len(reasons_fail) == 0,
         "tier": tier,
         "reasons_fail": reasons_fail,
         "data": {
-            "liquidity_usd": liquidity,
-            "holder_count": holders,
-            "mcap_usd": mcap,
-            "fdv_usd": fdv,   # reported for context only -- never used for tier classification, see mcap comment above
-            "organic_score": organic_score,
-            "organic_score_label": tok.get("organicScoreLabel"),
-            "top_holder_pct": top_holder_pct,
-            "pool_age_hours": pool_age_hours,
-            "mint_authority_disabled": audit.get("mintAuthorityDisabled"),
-            "freeze_authority_disabled": audit.get("freezeAuthorityDisabled"),
-            "jupiter_is_verified": tok.get("isVerified"),
-            "tags": tok.get("tags"),
-            "rugcheck_rugged": rug_rugged,
-            "rugcheck_risk_flags": rug_risks,
-            "dexscreener_cross_checked": dex_pair is not None,
+            "price_usd": price,
+            "volume_24h_usd": volume_24h_usd,
+            "spread_bps": spread_bps,
+            "mcap_usd": mcap_usd,
+            "status": data.get("status"),
+            "base": data.get("base"),
+            "wsname": data.get("wsname"),
         },
     }
 
 
 def main():
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    ap.add_argument("--max-candidates", type=int, default=250,
-                     help="Cap on unique candidates evaluated per run (be a good citizen to free APIs) -- keep in "
-                          "sync with config/discovery.yaml's max_candidates_per_cycle. Was 40; raised after "
-                          "verifying live that a 250-sample run found a real eligible candidate (MANLET) on the "
-                          "same safety thresholds a same-day 40-sample run had missed by chance -- see "
-                          "config/discovery.yaml's comment on max_candidates_per_cycle for the full reasoning.")
-    ap.add_argument("--limit-per-source", type=int, default=15)
-    ap.add_argument("--request-delay", type=float, default=0.4, help="Seconds between RugCheck/DexScreener calls")
-    ap.add_argument("--no-organic", action="store_true", help="Skip the toporganicscore source")
-    ap.add_argument("--no-trending", action="store_true", help="Skip the toptrending source")
-    ap.add_argument("--no-traded", action="store_true", help="Skip the toptraded (by volume) source")
-    ap.add_argument("--no-recent", action="store_true", help="Skip the recent-pools source")
-    ap.add_argument("--no-verified", action="store_true",
-                     help="Skip Jupiter's full verified-token list (2500+ tokens as of writing) -- the actual "
-                          "ecosystem-breadth source; the other sources are all momentum snapshots (whatever's "
-                          "trending/organic/newest right now) that can never surface an established-but-not-"
-                          "currently-hot token no matter how many cycles run")
-    ap.add_argument("--always-rugcheck", action="store_true",
-                     help="Call RugCheck even for candidates that already fail Jupiter's checks (uses more requests)")
-    ap.add_argument("--cross-check-dexscreener", dest="cross_check_dexscreener", action="store_true", default=True)
-    ap.add_argument("--no-cross-check-dexscreener", dest="cross_check_dexscreener", action="store_false")
-    # Safety thresholds -- keep in sync with config/discovery.yaml's `safety` block
-    ap.add_argument("--min-liquidity-usd", type=float, default=250_000)
-    ap.add_argument("--min-holder-count", type=int, default=500)
-    ap.add_argument("--min-pool-age-hours", type=float, default=72)
-    ap.add_argument("--min-organic-score", type=float, default=40)
-    ap.add_argument("--max-top-holder-pct", type=float, default=22.0)
-    ap.add_argument("--require-mint-renounced", dest="require_mint_renounced", action="store_true", default=True)
-    ap.add_argument("--allow-mint-authority", dest="require_mint_renounced", action="store_false")
-    ap.add_argument("--require-freeze-renounced", dest="require_freeze_renounced", action="store_true", default=True)
-    ap.add_argument("--allow-freeze-authority", dest="require_freeze_renounced", action="store_false")
-    # Tier thresholds -- keep in sync with config/discovery.yaml's `tiers` block
-    ap.add_argument("--blue-chip-mcap-usd", type=float, default=50_000_000)
-    ap.add_argument("--blue-chip-holder-count", type=int, default=10_000)
-    ap.add_argument("--established-mcap-usd", type=float, default=5_000_000)
-    ap.add_argument("--established-holder-count", type=int, default=2_000)
+    ap.add_argument("--max-candidates", type=int, default=700,
+                     help="Cap on candidates evaluated per run, ranked by 24h USD volume (highest first) -- set "
+                          "comfortably above Kraken's current USD-pair count (~637 as of writing) so this is a "
+                          "safety ceiling, not an active truncation: gather_candidates() already fetches Ticker "
+                          "data for every online USD pair in one batched call regardless of this value, so "
+                          "raising it costs nothing extra. Unlike the old Solana pipeline, Kraken's full universe "
+                          "is cheap enough (two bulk public API calls total, no per-candidate secondary lookup) "
+                          "to evaluate in full every cycle -- no rotation/sampling needed.")
+    ap.add_argument("--min-24h-volume-usd", type=float, default=1_000_000,
+                     help="Exit-liquidity proxy -- replaces the old pipeline's on-chain liquidity-pool check. $1M "
+                          "24h volume is a real but not overly strict floor for a centralized exchange pair; "
+                          "revisit with real data the same way the old min_liquidity_usd was tuned (see "
+                          "config/discovery.yaml's comment history) once live/paper results exist.")
+    ap.add_argument("--max-spread-bps", type=float, default=50.0,
+                     help="Max bid/ask spread as a fraction of mid price, in basis points. 50bps (0.5%%) is tight "
+                          "enough to exclude the most illiquid tail of Kraken's USD pairs without being so strict "
+                          "it only allows the handful of most-traded majors.")
+    ap.add_argument("--blue-chip-mcap-usd", type=float, default=50_000_000_000,
+                     help="Market cap threshold for blue_chip tier -- much higher than the old Solana pipeline's "
+                          "$50M, since Kraken's universe includes real large-cap assets (BTC, ETH) that a "
+                          "Solana-memecoin-shaped threshold would badly under-classify.")
+    ap.add_argument("--blue-chip-volume-usd", type=float, default=100_000_000)
+    ap.add_argument("--established-mcap-usd", type=float, default=1_000_000_000)
+    ap.add_argument("--established-volume-usd", type=float, default=10_000_000)
     args = ap.parse_args()
 
-    print("Gathering candidates from Jupiter Tokens API v2...")
+    print("Gathering USD pairs from Kraken (AssetPairs + Ticker)...")
     candidates = gather_candidates(args)
-    # Shuffle before truncating -- gather_candidates() lists momentum sources
-    # (organic/trending/traded/recent, ~70-130 tokens) before the
-    # verified-tag source (~2,561 tokens); without shuffling first, a small
-    # momentum pool can supply max_candidates' worth of tokens on its own
-    # every run, so this (what trade-cycle actually runs for live decisions)
-    # would never evaluate anything past roughly the first ~130 of a
-    # 2,600-token pool -- see the same fix in
-    # paper_trading/run_paper_cycle.py's select_candidates_for_rotation()
-    # for the live-verified version of this bug.
-    all_mints = list(candidates.keys())
-    random.shuffle(all_mints)
-    mints = all_mints[: args.max_candidates]
-    print(f"{len(candidates)} unique candidates found (deduped across sources); evaluating {len(mints)} (--max-candidates, sampled across the full pool).\n")
+    all_pairs = sorted(candidates, key=lambda p: candidates[p]["volume_24h_usd"], reverse=True)
+    pairs = all_pairs[: args.max_candidates]
+    print(f"{len(candidates)} online USD pairs found; evaluating {len(pairs)} (--max-candidates, "
+          f"highest 24h volume first).\n")
 
+    coingecko_ids = [KRAKEN_TO_COINGECKO_ID[_kraken_base_altname(candidates[p]["base"])]
+                      for p in pairs if _kraken_base_altname(candidates[p]["base"]) in KRAKEN_TO_COINGECKO_ID]
+    market_caps = fetch_market_caps_usd(coingecko_ids)
+
+    history = load_discovery_history()
     eligible, rejected = [], []
-    for i, mint in enumerate(mints, 1):
-        tok = candidates[mint]
-        print(f"  [{i}/{len(mints)}] {tok.get('symbol', '?'):>10}  {mint}")
-        result = evaluate_candidate(mint, tok, args)
+    for i, pair in enumerate(pairs, 1):
+        data = candidates[pair]
+        cg_id = KRAKEN_TO_COINGECKO_ID.get(_kraken_base_altname(data["base"]))
+        mcap_usd = market_caps.get(cg_id, 0) if cg_id else 0
+        print(f"  [{i}/{len(pairs)}] {data.get('altname', pair):>12}  {pair}")
+        result = evaluate_candidate(pair, data, args, mcap_usd=mcap_usd)
+        result["data"]["trend"] = record_and_compute_trend(pair, result["symbol"], result["data"], history)
         (eligible if result["eligible"] else rejected).append(result)
+    save_discovery_history(history)
 
     RESULTS_DIR.mkdir(parents=True, exist_ok=True)
     out_path = RESULTS_DIR / f"discovery_{datetime.now(timezone.utc).strftime('%Y%m%dT%H%M%SZ')}.json"
@@ -375,17 +388,16 @@ def main():
     print(f"\n{'=' * 60}\nELIGIBLE ({len(eligible)}):")
     for r in eligible:
         d = r["data"]
-        print(f"  {r['symbol']:>10}  tier={r['tier']:<10} liq=${d['liquidity_usd']:>12,.0f}  "
-              f"holders={d['holder_count']:>7}  organic={d['organic_score']}  mint={r['mint']}")
+        print(f"  {r['symbol']:>10}  tier={r['tier']:<10} vol24h=${d['volume_24h_usd']:>14,.0f}  "
+              f"spread={d['spread_bps']:.1f}bps  mcap=${d['mcap_usd']:>14,.0f}  pair={r['pair']}")
 
     print(f"\nREJECTED ({len(rejected)}):")
     for r in rejected:
         print(f"  {r['symbol']:>10}  {'; '.join(r['reasons_fail'][:2])}")
 
     print(f"\nFull report (all fields, all reasons) saved to {out_path}")
-    print("\nEligible tokens are candidates for the trade-cycle skill's signal step, not")
-    print("automatic buys -- position sizing/risk checks in config/risk.yaml still apply,")
-    print("and this script's output should still be spot-checked, not trusted blindly.")
+    print("\nEligible pairs are candidates for the trade-cycle skill's signal step, not")
+    print("automatic buys -- position sizing/risk checks in config/risk.yaml still apply.")
 
 
 if __name__ == "__main__":
