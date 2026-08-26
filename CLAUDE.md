@@ -18,9 +18,11 @@ kept for historical reference only.)
 ## What this project is
 
 - `kraken/` -- the Kraken REST API client (`client.py`, stdlib-only HMAC
-  request signing) and the order proposal/execution CLI
-  (`propose_order.py`). **Read `config/risk.yaml` before doing anything else
-  with the account.**
+  request signing), the order proposal/execution CLI (`propose_order.py`),
+  order-precision/minimum-size safety (`precision.py`), and real-fee-tier-
+  aware cost calculation (`fees.py`) -- see `docs/STRATEGY.md` "Fee-aware
+  execution". **Read `config/risk.yaml` before doing anything else with the
+  account.**
 - `config/risk.yaml` -- the risk/kill-switch config.
 - `config/core_assets.yaml` -- USD, the one thing exempt from live discovery
   (it's the settlement currency, not a trading candidate list).

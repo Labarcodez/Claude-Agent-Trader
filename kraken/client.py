@@ -256,6 +256,14 @@ def add_order(pair: str, side: str, ordertype: str, volume: str, price: str | No
     return _request("POST", "/0/private/AddOrder", data, private=True)
 
 
+def trade_volume(pair: str) -> dict:
+    """Wraps Kraken's private TradeVolume endpoint: the account's real
+    current 30-day-volume fee tier for `pair` (both maker and taker rates),
+    not a static assumption. See kraken/fees.py's parse_fee_tier() for
+    turning this into a usable FeeTier. Requires "Query Funds"."""
+    return _request("POST", "/0/private/TradeVolume", {"pair": pair, "fee-info": True}, private=True)
+
+
 def open_orders() -> dict:
     return _request("POST", "/0/private/OpenOrders", private=True)
 

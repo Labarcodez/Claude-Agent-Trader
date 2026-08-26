@@ -279,6 +279,23 @@ emerging-tier pairs that all move on the same sentiment). Diversification
 across tickers isn't real diversification if they're all correlated to the
 same underlying factor.
 
+## Fee-aware execution
+
+`kraken/fees.py` computes what a trade actually costs at the account's real
+current fee tier (`kraken.client.trade_volume()`), not a flat assumption --
+Kraken's maker/taker rates depend on live 30-day volume, so the same
+position size can cost meaningfully different amounts as the account trades
+more. `edge_clears_costs()` checks whether a position's take-profit target,
+if hit, would still net comfortably more than both legs' fees (plus entry
+spread for a market/taker order) -- a trade that only clears its own costs
+by a hair isn't worth the tail risk of a worse-than-modeled fill eating the
+rest. `kraken/precision.py`'s `clamp_to_pair_minimums()` separately checks a
+proposed size against Kraken's own per-pair `ordermin`/`costmin` (which can
+exceed `config/risk.yaml`'s project-level `min_trade_usd` for a thin or
+expensive pair) -- `kraken/propose_order.py` runs this automatically on
+every quote, so an order that Kraken would reject on size alone says so
+before anyone runs `--execute`.
+
 ## Exit discipline
 
 `stop_loss_pct`, `take_profit_pct`, and `trailing_stop_pct` in

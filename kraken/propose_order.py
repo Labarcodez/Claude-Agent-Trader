@@ -29,6 +29,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 from kraken import client as kc  # noqa: E402
+from kraken import precision as kp  # noqa: E402
 
 
 def _mid_price(t: dict) -> float:
@@ -54,10 +55,26 @@ def build_proposal(pair: str, side: str, amount: float, units: str) -> dict:
     spread_bps = _spread_bps(t)
     volume = amount if units == "base" else amount / price
     usd_value = volume * price
+
+    # Kraken rejects an order whose price/volume carries more decimal
+    # places than the pair allows, and separately rejects one below the
+    # pair's own ordermin/costmin -- both real, per-pair constraints (not
+    # config/risk.yaml's project-level min_trade_usd, which can be smaller
+    # than what Kraken itself requires for a thin/expensive pair). Checked
+    # here so a proposal that would be rejected on these grounds says so up
+    # front, before anyone runs --execute.
+    pairs_info = kc.asset_pairs()
+    info = pairs_info.get(key, {})
+    volume = kp.round_volume(volume, info.get("lot_decimals"))
+    price_rounded = kp.round_price(price, info.get("pair_decimals"))
+    usd_value = volume * price
+    minimum_check = kp.clamp_to_pair_minimums(usd_value, price, info.get("ordermin"), info.get("costmin"))
+
     return {
         "pair": pair, "side": side, "ordertype": "market",
-        "volume": round(volume, 10), "estimated_price_usd": price,
+        "volume": volume, "estimated_price_usd": price_rounded,
         "estimated_usd_value": round(usd_value, 2), "spread_bps": round(spread_bps, 2),
+        "meets_pair_minimums": minimum_check["ok"], "pair_minimum_reason": minimum_check["reason"],
     }
 
 
@@ -75,6 +92,8 @@ def main():
     proposal = build_proposal(args.pair, args.side, args.amount, args.units)
     print(f"Quote: {args.side} {proposal['volume']} {args.pair} (~${proposal['estimated_usd_value']:.2f}) "
           f"@ ~${proposal['estimated_price_usd']:.6f}, spread {proposal['spread_bps']:.1f}bps", file=sys.stderr)
+    if not proposal["meets_pair_minimums"]:
+        print(f"! {proposal['pair_minimum_reason']} -- Kraken will reject this order as sized", file=sys.stderr)
 
     if not args.execute:
         # Kraken's own validate=True flag double-checks the order would be
