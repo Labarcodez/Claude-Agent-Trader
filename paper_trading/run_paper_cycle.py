@@ -28,6 +28,14 @@ Simplifications vs. the live trade-cycle skill (documented, not hidden):
   - No real order-book depth check, so no live slippage/spread check at
     order time -- a fixed fee_bps + slippage_bps cost is assumed instead
     (same convention as backtest/engine.py).
+  - No live fee-tier lookup -- the live skill queries the account's real,
+    current Kraken fee tier each cycle (account/fees.py's parse_fee_tier(),
+    via the MCP `volume` tool); this script always uses the flat
+    --fee-bps/--slippage-bps CLI defaults instead, since there's no real
+    account/fee history to look up in a simulation.
+  - No account/fees.py min_edge_to_cost_multiple check -- a paper entry only
+    needs a "buy" signal, not a fee-clears-costs check, so its size/entry
+    logic is simpler than what trade-cycle's step 7 actually requires live.
   - No max_daily_trade_count / max_daily_volume_usd / min_hours_between_trades
     cadence caps -- this script is typically run manually or via /loop at a
     deliberate interval, so cadence is controlled by how often you run it.

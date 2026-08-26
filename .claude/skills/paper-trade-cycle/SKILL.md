@@ -56,8 +56,10 @@ don't mix with new ones).
 
 Read `paper_trading/run_paper_cycle.py`'s module docstring for the specific
 ways it simplifies vs. live trading (no real order-book depth check, no
-daily trade-count/volume cadence caps, no Earn/idle-cash yield simulation)
-before treating its results as a precise forecast of live behavior -- it's a
+daily trade-count/volume cadence caps, no Earn/idle-cash yield simulation,
+no live fee-tier lookup or `account/fees.py` min-edge-to-cost check -- flat
+fee/slippage assumptions throughout) before treating its results as a
+precise forecast of live behavior -- it's a
 pipeline validator, not a perfect simulator.
 
 ## After running

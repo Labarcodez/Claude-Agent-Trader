@@ -51,6 +51,11 @@ product (Earn) for idle cash between trades -- see `docs/STRATEGY.md`.
   and bid/ask spread. This is what "the agent finds its own pairs" means
   concretely -- read it before assuming a pair needs to be added anywhere
   by hand.
+- `account/` -- deterministic portfolio valuation (`portfolio.py`), fee
+  calculation (`fees.py`), and order-precision/minimum-size safety
+  (`precision.py`). The trade-cycle skill calls these instead of computing
+  "how much is in the account" or "what will this cost in fees" by hand --
+  see `docs/STRATEGY.md` "Precise portfolio valuation & fee-aware sizing".
 - `.claude/skills/trade-cycle/` -- the autonomous discover-decide-execute loop.
 - `.claude/skills/backtest-strategy/` -- validates strategies before they're
   trusted live.
@@ -139,15 +144,25 @@ product (Earn) for idle cash between trades -- see `docs/STRATEGY.md`.
    `research/discover_candidates.py`'s docstring for why), and understand
    why each threshold exists per `docs/STRATEGY.md` before loosening it.
 8. **Run `python3 -m unittest discover -s tests -v` after touching any
-   logic in `backtest/`, `research/discover_candidates.py`, or
-   `paper_trading/run_paper_cycle.py`, before claiming the change works.**
-   The test suite exists specifically because this kind of code has
-   non-obvious edge cases (see `backtest/strategies.py`'s `rsi()` -- a
-   flat/no-movement price series used to read as "overbought" until a test
-   caught it); don't reintroduce what it's already checking for.
+   logic in `backtest/`, `research/discover_candidates.py`,
+   `paper_trading/run_paper_cycle.py`, or `account/`, before claiming the
+   change works.** The test suite exists specifically because this kind of
+   code has non-obvious edge cases (see `backtest/strategies.py`'s `rsi()`
+   -- a flat/no-movement price series used to read as "overbought" until a
+   test caught it); don't reintroduce what it's already checking for.
 9. **Never enable margin, futures, or Bonded Earn without a deliberate,
    explicit human decision.** `config/risk.yaml`'s `asset_classes` and
    `kraken_earn.flexible_only: true` encode this; see `docs/STRATEGY.md`
    "What this project deliberately doesn't do (yet)" and "Idle-capital
    yield" for why -- leverage and locked capital both silently invalidate
    this project's risk model if turned on casually.
+10. **Never hand-compute portfolio value, fee cost, or order price/volume
+    precision when the `account/` package can do it deterministically.**
+    Feed the Kraken MCP tools' JSON straight into `account/portfolio.py`'s
+    `usd_value_of_balances()`, `account/fees.py`'s `parse_fee_tier()`/
+    `edge_clears_costs()`, and `account/precision.py`'s `round_price()`/
+    `round_volume()`/`clamp_to_pair_minimums()` per
+    `.claude/skills/trade-cycle/SKILL.md` steps 2, 7, and 8 -- these
+    functions exist specifically because this arithmetic is easy to get
+    subtly wrong by hand, and every risk check in this project depends on
+    it being right.

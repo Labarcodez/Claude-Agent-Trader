@@ -84,11 +84,32 @@ min_hours_between_trades_same_pair: 4
 # version could. Prefer limit (maker) orders over market (taker) orders on
 # entries whenever the strategy signal isn't time-critical, to capture the
 # ~15bps maker/taker differential; see docs/STRATEGY.md "Fee-aware execution".
+#
+# max_taker_fee_bps / default_maker_fee_bps below are conservative FALLBACKS
+# only -- the real, live number for the account's actual current fee tier
+# comes from the Kraken MCP `volume` tool each cycle, parsed by
+# account/fees.py's parse_fee_tier() (see .claude/skills/trade-cycle/SKILL.md
+# step 7). These two values are what parse_fee_tier() falls back to if that
+# lookup ever fails or the pair has no trade history yet on the account --
+# never the number sizing math should prefer when a live tier is available.
 prefer_maker_orders: true
-max_taker_fee_bps: 40            # matches Kraken's lowest-tier taker fee; re-check kraken volume/fees against your account's actual current tier
+max_taker_fee_bps: 40            # fallback only -- matches Kraken's lowest-tier taker fee
+default_maker_fee_bps: 25        # fallback only -- matches Kraken's lowest-tier maker fee
 max_slippage_bps: 50             # abort a market order if the fill would be worse than this vs. the last quoted price
 min_orderbook_depth_usd: 20000   # required resting size within max_slippage_bps of the mid price (both sides) before sizing a market order against it -- see `kraken orderbook`
 max_spread_bps: 50               # matches config/discovery.yaml's safety.max_spread_bps -- re-verify live at execution time, not just from the last discovery pass
+
+# Fee-aware entry gate: account/fees.py's edge_clears_costs() computes, for
+# a proposed position size, whether the dollar profit AT take_profit_pct
+# would still be at least this many times bigger than both legs' round-trip
+# fees (+ entry spread cost for a taker order). A trade that only clears its
+# own costs by a hair isn't worth the tail risk of a slightly-worse-than-
+# modeled fill eating the rest of the edge -- see docs/STRATEGY.md
+# "Precise portfolio valuation & fee-aware sizing". Does not gate exits --
+# a stop-loss or take-profit that's already triggered always executes
+# regardless of this ratio; it only gates whether a NEW position is worth
+# opening in the first place.
+min_edge_to_cost_multiple: 2.0
 
 # ---- Stop loss / take profit (per position) ----------------------------------
 stop_loss_pct: 0.15              # exit a position down 15% from entry

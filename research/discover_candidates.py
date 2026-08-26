@@ -39,16 +39,15 @@ import urllib.error
 from datetime import datetime, timezone
 from pathlib import Path
 
+REPO_ROOT = Path(__file__).resolve().parent.parent
+sys.path.insert(0, str(REPO_ROOT))
+
+from account.kraken_common import LEGACY_ASSET_PREFIX  # noqa: E402 -- single source of truth, shared with account/portfolio.py
+
 KRAKEN_BASE = "https://api.kraken.com/0/public"
 USER_AGENT = "claude-agent-trader-discovery/1.0"
 
 RESULTS_DIR = Path(__file__).parent / "results"
-
-# Kraken's legacy asset codes prefix fiat with "Z" and certain crypto (BTC,
-# ETH, LTC, ...) with "X" for historical reasons (ISO 4217-style vs. the old
-# pre-4217 convention). altname on both /AssetPairs and /Assets already
-# strips this, so this map is only used as a defensive fallback for display.
-LEGACY_ASSET_PREFIX = re.compile(r"^[XZ](?=[A-Z]{3,})")
 
 ALLOWED_QUOTE_CURRENCIES = {"USD", "USDT", "USDC"}
 REQUIRED_PAIR_STATUS = "online"
@@ -186,7 +185,20 @@ def evaluate_candidate(altname: str, candidate: dict, args) -> dict:
     status = pair_info.get("status")
     ordermin = pair_info.get("ordermin")
     costmin = pair_info.get("costmin")
+    # Order-construction precision -- see account/precision.py, which rounds
+    # a proposed order's price/volume to exactly these before it's ever sent
+    # to Kraken, and clamp_to_pair_minimums(), which uses ordermin/costmin
+    # above. Surfaced here so trade-cycle never has to re-fetch AssetPairs
+    # itself just to place an order for something this cycle already found.
+    pair_decimals = pair_info.get("pair_decimals")
+    lot_decimals = pair_info.get("lot_decimals")
     margin_allowed = bool(pair_info.get("leverage_buy")) or bool(pair_info.get("leverage_sell"))
+
+    precision_data = {
+        "ordermin": ordermin, "costmin": costmin,
+        "pair_decimals": pair_decimals, "lot_decimals": lot_decimals,
+        "margin_allowed": margin_allowed,
+    }
 
     if status != REQUIRED_PAIR_STATUS:
         reasons_fail.append(f"pair status '{status}' != '{REQUIRED_PAIR_STATUS}'")
@@ -196,7 +208,7 @@ def evaluate_candidate(altname: str, candidate: dict, args) -> dict:
         return {
             "altname": altname, "base": base, "quote": quote, "wsname": wsname,
             "eligible": False, "tier": None, "reasons_fail": reasons_fail,
-            "data": {"status": status, "ordermin": ordermin, "costmin": costmin, "margin_allowed": margin_allowed},
+            "data": {"status": status, **precision_data},
         }
 
     try:
@@ -210,7 +222,7 @@ def evaluate_candidate(altname: str, candidate: dict, args) -> dict:
         return {
             "altname": altname, "base": base, "quote": quote, "wsname": wsname,
             "eligible": False, "tier": None, "reasons_fail": reasons_fail,
-            "data": {"status": status, "ordermin": ordermin, "costmin": costmin, "margin_allowed": margin_allowed},
+            "data": {"status": status, **precision_data},
         }
 
     quote_volume_24h_usd = vol_24h_base * vwap_24h   # vwap_24h is already in quote-currency terms; USD/USDT/USDC all treated ~1:1 with USD for sizing purposes
@@ -245,9 +257,7 @@ def evaluate_candidate(altname: str, candidate: dict, args) -> dict:
             "volume_24h_base": vol_24h_base,
             "vwap_24h": vwap_24h,
             "quote_volume_24h_usd": quote_volume_24h_usd,
-            "ordermin": ordermin,
-            "costmin": costmin,
-            "margin_allowed": margin_allowed,
+            **precision_data,
         },
     }
 

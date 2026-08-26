@@ -81,9 +81,11 @@ python3 -m unittest discover -s tests -v
 ```
 
 Unit tests (stdlib `unittest`, no extra dependency) cover the strategy math,
-the backtest engine's simulation mechanics, and the discovery pipeline's
-liquidity/spread/tier logic against synthetic data -- fast, deterministic,
-no network calls. They run automatically on every push/PR via
+the backtest engine's simulation mechanics, the discovery pipeline's
+liquidity/spread/tier logic, and the `account/` package's portfolio
+valuation, fee calculation, and order-precision math, all against synthetic
+data -- fast, deterministic, no network calls. They run automatically on
+every push/PR via
 [`.github/workflows/tests.yml`](.github/workflows/tests.yml). This is one
 layer of a four-layer validation approach, each catching a different kind of
 mistake before it costs real money:
@@ -155,6 +157,10 @@ on Kraken" reasoning, including fee-aware execution and idle-capital yield.
   orders to capture Kraken's lower maker fee rate, checked against live
   spread and order-book depth before sizing -- see `docs/STRATEGY.md`
   "Fee-aware execution".
+- **Deterministic balance/fee math**: portfolio valuation and fee/cost
+  calculations run through the unit-tested `account/` package (see below),
+  not ad-hoc arithmetic -- every risk check depends on these numbers being
+  right.
 - **No leverage by default**: margin and perpetual futures are available on
   Kraken and exposed by the MCP server, but disabled in
   `config/risk.yaml`'s `asset_classes` unless a human explicitly turns them
@@ -179,13 +185,14 @@ circuit-breaker recovery.
 | `config/core_assets.yaml` | USD/USDT -- the only non-discovered tradeable assets |
 | `config/discovery.yaml` | Discovery sources, safety thresholds, tiers, pinned/denylist |
 | `research/discover_candidates.py` | Live Kraken pair discovery + automated liquidity/spread scoring |
+| `account/` | Deterministic portfolio valuation, fee calculation, and order-precision math -- see `docs/STRATEGY.md` "Precise portfolio valuation & fee-aware sizing" |
 | `.claude/skills/trade-cycle/` | The autonomous trading loop |
 | `.claude/skills/backtest-strategy/` | Strategy validation workflow |
 | `.claude/skills/paper-trade-cycle/` | Zero-risk simulated trading (full pipeline, no Kraken account needed) |
 | `backtest/` | Backtesting engine, strategies, single-pair CLI |
 | `backtest/backtest_all.py` | Comprehensive backtest -- everything eligible + BTC/ETH, one ranked report |
 | `paper_trading/run_paper_cycle.py` | Paper-trading simulator (real pipeline, simulated fills) |
-| `tests/` | Unit tests (stdlib `unittest`) for strategies, engine, discovery, and paper-trading sizing logic |
+| `tests/` | Unit tests (stdlib `unittest`) for strategies, engine, discovery, account math, and paper-trading sizing logic |
 | `.github/workflows/tests.yml` | CI -- runs `tests/` on every push/PR |
 | `docs/KRAKEN_CLI_SETUP.md` | API key setup & funding |
 | `docs/STRATEGY.md` | How to make money on Kraken: fees, Earn, discovery, strategy/risk reasoning |

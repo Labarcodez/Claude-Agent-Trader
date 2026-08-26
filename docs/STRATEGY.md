@@ -38,10 +38,12 @@ compounds on every trade:
   lets an account qualify for a better tier via either 30-day trade volume
   OR assets-on-platform, whichever is better -- meaning a small account that
   mostly holds (rather than churns) can sometimes land a better rate than
-  volume alone would suggest. Worth re-checking (`kraken volume --pair
-  <pair>`) periodically rather than assuming the lowest tier forever.
-  `config/risk.yaml`'s `max_taker_fee_bps` should be re-verified against
-  whatever tier the account is actually on.
+  volume alone would suggest. `trade-cycle` looks this up live every cycle
+  (`kraken volume --pair <pair>`, parsed by `account/fees.py`) rather than
+  assuming a fixed tier -- `config/risk.yaml`'s `max_taker_fee_bps`/
+  `default_maker_fee_bps` are fallbacks for when that lookup fails, not the
+  number sizing math should prefer when a live tier is available. See
+  "Precise portfolio valuation & fee-aware sizing" below.
 - **Check spread and order-book depth before sizing a market order.** A
   wide spread or thin book means the effective cost is much higher than the
   fee alone -- `config/risk.yaml`'s `max_spread_bps` and
@@ -52,6 +54,61 @@ compounds on every trade:
   small account, for the same reason as the original Solana version, just
   with real disclosed numbers behind it now instead of an assumed-near-zero
   DEX cost.
+
+## Precise portfolio valuation & fee-aware sizing (the `account/` package)
+
+The trade-cycle skill is an LLM following instructions, not a deterministic
+program -- and "how much is actually in the account, in USD, right now" is
+exactly the kind of arithmetic that's easy to get subtly wrong under
+context/time pressure, especially with several holdings, legacy Kraken
+asset codes (`XXBT`, `ZUSD`, ...), and a mix of stable and non-stable
+balances. A wrong total silently corrupts every risk check downstream:
+the circuit breaker floor, portfolio heat, `max_position_usd`, and
+`max_non_stable_exposure_fraction` all key off `portfolio_value_usd`.
+Likewise, a static/wrong fee assumption can size a position whose own
+take-profit target barely -- or doesn't -- clear its own round-trip costs.
+
+The `account/` package turns both calculations into small, pure,
+unit-tested Python functions the skill *calls*, instead of ones it derives
+by hand each cycle:
+
+- **`account/portfolio.py`** -- `normalize_balances()` handles Kraken's
+  legacy asset-code quirks (`XXBT` -> `BTC`, `ZUSD` -> `USD`) so nothing is
+  silently double-counted or dropped; `usd_value_of_balances()` computes
+  the total, with one deliberate safety property: an asset that couldn't be
+  priced is **excluded** from the total, not counted as $0 by accident --
+  logged in `pricing_errors` instead. For live circuit-breaker math this
+  biases the computed total *down* when something goes wrong, which in the
+  worst case causes a false-positive circuit-breaker trip (halts new
+  entries) rather than a false sense of safety that lets trading continue
+  past a real drawdown the agent simply failed to price. Treat any non-empty
+  `pricing_errors` as something to report and investigate, not background
+  noise.
+- **`account/fees.py`** -- `parse_fee_tier()` reads the account's real,
+  live fee tier from Kraken's `TradeVolume` data (via the MCP `volume`
+  tool), falling back to `config/risk.yaml`'s conservative defaults only if
+  that lookup fails. `round_trip_cost_usd()` and `compare_maker_vs_taker()`
+  give the concrete dollar case for preferring maker orders (see
+  "Fee-aware execution" above). `edge_clears_costs()` is
+  `min_edge_to_cost_multiple`'s implementation: does this position's
+  take-profit target, if hit, net at least 2x (by default) its own
+  round-trip fee cost? Deliberately does *not* gate on `stop_loss_pct` --
+  a stop-loss is a risk limit, not a profit target, and shouldn't need to
+  clear a profitability bar to be allowed to protect capital.
+- **`account/precision.py`** -- Kraken rejects an order whose price or
+  volume carries more decimal places than a pair allows, or that falls
+  below the pair's own `ordermin`/`costmin`. `round_price()`/
+  `round_volume()` (the latter floors, deliberately, so an order never
+  claims more size than was actually paid for) and
+  `clamp_to_pair_minimums()` turn what used to be a prose reminder ("also
+  check the pair's minimums") into an actual, testable check run before
+  every order.
+
+See `.claude/skills/trade-cycle/SKILL.md` steps 2, 7, and 8 for exactly
+where each of these gets called in a live cycle. All three modules are pure
+computation (no network calls of their own) and covered by
+`tests/test_account_*.py` -- run `python3 -m unittest discover -s tests -v`
+after touching any of them, same as `backtest/` or `research/`.
 
 ## Idle-capital yield (Kraken Earn)
 

@@ -64,13 +64,34 @@ Use the Kraken MCP tools (or CLI directly) to get:
 - All balances (`balance`), including USD/USDT cash and every currently-held
   position (whatever's actually in the account, whether or not it's still a
   discovery candidate this cycle -- it needs to be trackable for exit
-  either way).
+  either way). Include any balance currently allocated to Kraken Earn (step
+  9) -- it's still the account's capital, just working instead of idle.
 - Mark each non-cash balance to USD (use `ticker` for the relevant pair, or
   the CoinGecko MCP tool if available).
 
-Compute `portfolio_value_usd` = sum of all mark-to-market balances,
-**including any amount currently allocated to Kraken Earn** (step 9) -- it's
-still the account's capital, just working instead of idle.
+**Compute `portfolio_value_usd` with `account/portfolio.py`, not by hand.**
+This is the load-bearing number every risk check in this skill depends on --
+an arithmetic slip here silently corrupts the circuit breaker, portfolio
+heat, and every position-sizing calculation downstream, so don't add it up
+mentally. Run it against the JSON the MCP tools just returned:
+```
+python3 -c "
+import json
+from account.portfolio import normalize_balances, usd_value_of_balances
+balances = normalize_balances(<balance tool's result dict>)
+valuation = usd_value_of_balances(balances, prices_usd=<{asset: price} from ticker calls>)
+print(json.dumps(valuation.to_dict(), indent=2))
+"
+```
+(or the equivalent import inside a short script -- the point is calling
+`normalize_balances`/`usd_value_of_balances`, not re-deriving their logic).
+Use `valuation.total_usd` as `portfolio_value_usd` everywhere below.
+**If `valuation.pricing_errors` is non-empty**, that many assets were
+excluded from the total (conservatively, not zero-defaulted -- see the
+function's docstring) -- name them in this cycle's report, don't just
+silently proceed as if the number were complete. `valuation.non_stable_exposure_fraction`
+is exactly what step 7's `max_non_stable_exposure_fraction` check needs,
+computed the same way every cycle.
 
 **Establish starting capital (there is no fixed/required amount -- whatever
 is actually in the account is what gets traded):**
@@ -187,6 +208,14 @@ A single strategy's stop-loss/take-profit trigger is always enough to exit
 
 ## 7. Position sizing & risk checks
 
+**First, look up the account's real current fee tier** with
+`account/fees.py`'s `parse_fee_tier`, fed the Kraken MCP `volume` tool's
+result for this pair (falls back to `config/risk.yaml`'s
+`max_taker_fee_bps`/`default_maker_fee_bps` if the pair has no trade history
+on this account yet -- see that function's docstring). Use the real
+`taker_fee_bps`/`maker_fee_bps` it returns everywhere below instead of the
+config fallbacks whenever the lookup succeeds (check `used_default`).
+
 Before proposing any trade, check ALL of:
 
 - [ ] Pair is USD/USDT-settled and was `eligible: true` in this cycle's
@@ -195,13 +224,28 @@ Before proposing any trade, check ALL of:
 - [ ] `max_concurrent_positions` not exceeded (for a new entry)
 - [ ] `max_emerging_tier_positions` not exceeded, for a new emerging-tier entry
 - [ ] `max_same_ecosystem_positions` not exceeded
-- [ ] `max_non_stable_exposure_fraction` not exceeded after this trade
+- [ ] `max_non_stable_exposure_fraction` not exceeded after this trade (use
+      step 2's `valuation.non_stable_exposure_fraction`, recomputed with
+      this candidate's size added in)
 - [ ] Regime filter allows new entries (step 4)
 - [ ] Base position size = `min(max_position_usd, portfolio_value_usd * max_position_fraction) * tier_multiplier`
       (tier multipliers from `config/discovery.yaml`'s `tiers` block)
 - [ ] Volatility-scaled size = `base_size * clamp(target_daily_volatility_pct / realized_20d_volatility_pct, volatility_size_min_mult, volatility_size_max_mult)`
-      (skip this scaling -- use the tier's minimum size instead -- for a pair with no price history per step 6),
-      and the result is `>= min_trade_usd` AND `>= the pair's own Kraken costmin` (else skip -- too small to be worth fees, or below what Kraken will even accept)
+      (skip this scaling -- use the tier's minimum size instead -- for a pair with no price history per step 6)
+- [ ] Check the sized amount against the pair's own Kraken minimums with
+      `account/precision.py`'s `clamp_to_pair_minimums(size_usd, price, ordermin, costmin)`
+      (ordermin/costmin come straight from this cycle's discovery output --
+      see `research/discover_candidates.py`'s `data.ordermin`/`data.costmin`).
+      If it reports `ok: False`, either bump the size to `min_required_usd`
+      (only if that still fits every cap above) or skip -- never send an
+      order Kraken will just reject. The result must also be `>= min_trade_usd`.
+- [ ] **Fee-aware edge check**: `account/fees.py`'s `edge_clears_costs(size_usd, take_profit_pct, entry_fee_bps, exit_fee_bps, entry_spread_bps, min_edge_multiple=config's min_edge_to_cost_multiple)`
+      must return `clears: True` -- if the position's own take-profit target
+      wouldn't net at least `min_edge_to_cost_multiple`x its round-trip fee
+      cost, skip it regardless of how good the signal looks. Use the maker
+      fee for `entry_fee_bps` if this will be a limit order (step 8), taker
+      otherwise, and `entry_spread_bps=0` for a maker entry (`spread_bps`
+      from this cycle's discovery/ticker data for a taker entry).
 - [ ] Adding this position keeps `sum(position_size_usd * stop_loss_pct) / portfolio_value_usd <= max_portfolio_heat_pct`
       (portfolio heat -- compute across ALL open positions including this candidate)
 - [ ] Today's cumulative trade count < `max_daily_trade_count`
@@ -225,13 +269,21 @@ for suspicion, not a reason to fire them all):
    rate on every entry -- see `docs/STRATEGY.md` "Fee-aware execution". Use
    a market order only when the signal calls for immediate execution (e.g.
    a stop-loss exit).
-2. Place the order via the Kraken MCP trade tool (`order buy`/`order sell`).
+2. **Round the price and volume before submitting**, with
+   `account/precision.py`'s `round_price(price, pair_decimals)` and
+   `round_volume(volume, lot_decimals)` (both fields come from this cycle's
+   discovery output, `data.pair_decimals`/`data.lot_decimals`) -- an order
+   with more decimal places than Kraken allows for that pair is rejected
+   outright. `round_volume` floors rather than rounds, deliberately, so the
+   order never claims more base-currency size than was actually sized/paid
+   for.
+3. Place the order via the Kraken MCP trade tool (`order buy`/`order sell`).
    Prefer Kraken's own native `stop-loss`/`take-profit`/`trailing-stop`
    order types for exits where practical, rather than only checking them in
    software each cycle -- a resting order on Kraken survives even if a
    future trade-cycle run is missed or delayed.
-3. Record the order/transaction id and fill details.
-4. Re-fetch balances to confirm the trade landed as expected.
+4. Record the order/transaction id and fill details.
+5. Re-fetch balances to confirm the trade landed as expected.
 
 If a call errors or the fill looks wrong (e.g. price far off the quote),
 stop executing further trades this cycle and log the anomaly clearly --

@@ -111,6 +111,31 @@ Notes on the service scopes chosen here:
   futures/leverage are out of scope by default (see `config/risk.yaml`'s
   `asset_classes`).
 
+## 4b. Spot-check the `account/` package against your real installation
+
+The `account/` package (`docs/STRATEGY.md` "Precise portfolio valuation &
+fee-aware sizing") computes portfolio value and fee costs from the JSON the
+Kraken MCP `balance`/`ticker`/`volume` tools return. Its parsing is written
+against Kraken's own documented REST API response shapes, which is stable
+and authoritative -- but if you ever use `account/portfolio.py`'s or
+`account/fees.py`'s standalone CLI mode (which shells out to `kraken ... -o
+json` instead of going through the MCP tools), run each once and compare:
+
+```
+kraken balance -o json
+kraken volume --pair XBTUSD -o json
+```
+
+against what `account/kraken_common.run_kraken_cli`'s docstring expects
+(the "result" key, if present, unwrapped; `fees`/`fees_maker` keyed by pair
+for `volume`). If your installed kraken-cli version reshapes these
+differently, adjust the lookups in `account/portfolio.py`'s `main()` /
+`account/fees.py`'s `parse_fee_tier()` accordingly -- this was not verified
+against a live installed binary when written (no network access to do so at
+the time). This caveat does NOT apply to the live trade-cycle skill's
+primary path (MCP tool JSON fed directly into the pure functions), only to
+the CLI convenience wrappers.
+
 ## 5. Fund the account and verify before going live
 
 1. Deposit whatever amount you actually intend to risk -- there's no
