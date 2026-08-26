@@ -490,6 +490,27 @@ class TestPriceHistoryCachePathIsIntervalAware(unittest.TestCase):
         self.assertEqual(len(paths), 4)
 
 
+class TestPriceHistoryCacheTtlIsIntervalAware(unittest.TestCase):
+    """_price_history_cache_ttl_seconds() -- a fixed 3600s TTL (right for
+    the daily default, where a close never changes intra-day) would silently
+    serve an hour-stale signal on day-trading intervals, potentially
+    skipping right past the one bar a strategy like ema_ribbon/
+    donchian_channel_breakout is watching for. The TTL must scale down with
+    the bar width instead of staying pinned to the daily-era constant."""
+
+    def test_daily_interval_uses_the_full_ceiling(self):
+        self.assertEqual(p._price_history_cache_ttl_seconds(1440), 3600)
+
+    def test_hourly_interval_exactly_matches_the_ceiling(self):
+        self.assertEqual(p._price_history_cache_ttl_seconds(60), 3600)
+
+    def test_fifteen_minute_interval_scales_down_below_the_ceiling(self):
+        self.assertEqual(p._price_history_cache_ttl_seconds(15), 900)
+
+    def test_five_minute_interval_scales_down_below_the_ceiling(self):
+        self.assertEqual(p._price_history_cache_ttl_seconds(5), 300)
+
+
 class TestPriceHistoryCache(unittest.TestCase):
     """get_price_history_closes() caches per (pair, days) for
     PRICE_HISTORY_CACHE_TTL_SECONDS -- with several eligible candidates per
@@ -532,6 +553,23 @@ class TestPriceHistoryCache(unittest.TestCase):
         p.get_price_history_closes("XBTUSD", 30, interval_minutes=60)
         p.get_price_history_closes("XBTUSD", 30, interval_minutes=15)
         self.assertEqual(mock_fetch.call_count, 2, "a different interval must not be served from another interval's cache")
+
+    @patch("backtest.fetch_history.fetch_ohlc_kraken")
+    def test_a_20_minute_old_entry_is_stale_at_15min_interval_but_fresh_at_60min(self, mock_fetch):
+        mock_fetch.return_value = {"prices": [[i, 100.0 + i] for i in range(20)]}
+        p.get_price_history_closes("XBTUSD", 30, interval_minutes=15)
+        p.get_price_history_closes("XBTUSD", 30, interval_minutes=60)
+        self.assertEqual(mock_fetch.call_count, 2)
+        stale = datetime.now(timezone.utc) - timedelta(minutes=20)
+        for interval in (15, 60):
+            path = p._price_history_cache_path("XBTUSD", 30, interval_minutes=interval)
+            cached = json.loads(path.read_text())
+            cached["computed_at"] = stale.isoformat()
+            path.write_text(json.dumps(cached))
+        p.get_price_history_closes("XBTUSD", 30, interval_minutes=15)
+        self.assertEqual(mock_fetch.call_count, 3, "the 15-minute-bar entry is 20 minutes stale (TTL 900s) and must refetch")
+        p.get_price_history_closes("XBTUSD", 30, interval_minutes=60)
+        self.assertEqual(mock_fetch.call_count, 3, "the 60-minute-bar entry is well within its TTL (3600s) and must NOT refetch")
 
     @patch("backtest.fetch_history.fetch_ohlc_kraken")
     def test_uses_an_impatient_retry_policy_not_the_backtest_default(self, mock_fetch):

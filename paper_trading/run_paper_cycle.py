@@ -88,15 +88,33 @@ REGIME_CACHE_PATH = REPO_ROOT / "state" / "regime_cache.json"
 REGIME_CACHE_TTL_SECONDS = 3600  # regime is a daily-scale (30d SMA) signal -- refetching every 15min cycle is
                                   # unnecessary load for no real freshness gain
 PRICE_HISTORY_CACHE_DIR = REPO_ROOT / "state" / "price_history_cache"
-PRICE_HISTORY_CACHE_TTL_SECONDS = 3600  # a pair's daily closes barely change within 15 minutes, but signal
-                                          # generation would otherwise re-fetch every eligible candidate's
-                                          # history every cycle
-MAX_FRESH_PRICE_HISTORY_FETCHES_PER_CYCLE = 30  # bounds cycle duration when discovery surfaces many
-                                                  # never-before-cached pairs at once. Kraken's OHLC endpoint is a
-                                                  # single fast, reliable upstream (unlike the old CoinGecko-by-
-                                                  # contract path, which stacked retries against a much slower,
-                                                  # more rate-limited API) -- deferred candidates are simply
-                                                  # reconsidered next cycle, no correctness loss.
+PRICE_HISTORY_CACHE_TTL_SECONDS = 3600  # ceiling, used as-is for the daily default (1440min bars) -- a daily
+                                          # close doesn't change intra-day at all, so checking hourly is already
+                                          # conservative. _price_history_cache_ttl_seconds() below scales this
+                                          # down for shorter --interval-minutes bars so a fresh 15m/5m candle is
+                                          # actually picked up within roughly one bar's width, not served stale
+                                          # for up to an hour regardless of granularity (a real bug for
+                                          # day-trading mode until 2026-08-26: this constant predates
+                                          # --interval-minutes and was never revisited when that was added).
+MAX_FRESH_PRICE_HISTORY_FETCHES_PER_CYCLE = 250  # bounds cycle duration when discovery surfaces many
+                                                  # never-before-cached pairs at once -- a safety ceiling, not an
+                                                  # active target, same convention as discover_candidates.py's
+                                                  # --max-candidates=700 vs Kraken's real ~627-pair universe.
+                                                  # Raised 2026-08-26, twice: 30 -> 80 -> 250. Kraken's eligible
+                                                  # universe currently runs ~150/cycle; 30 meant 5+ cycles just to
+                                                  # get a first look at every eligible pair, and even 80 needed 2
+                                                  # -- both easy to misread as "nothing is buyable" when it's
+                                                  # really "most pairs haven't been checked yet" (see
+                                                  # docs/STRATEGY.md "Trade frequency, not just trade quality").
+                                                  # 250 clears today's full eligible set in ONE cycle from cold
+                                                  # (verified live 2026-08-26: 148/149 eligible pairs checked,
+                                                  # 0 deferred, a real buy signal surfaced) with headroom for the
+                                                  # eligible count to grow before this needs revisiting again.
+                                                  # Kraken's OHLC endpoint is a single fast, reliable upstream
+                                                  # (unlike the old CoinGecko-by-contract path, which stacked
+                                                  # retries against a much slower, more rate-limited API) --
+                                                  # deferred candidates are simply reconsidered next cycle, no
+                                                  # correctness loss.
 
 TIER_MULTIPLIERS = {"blue_chip": 1.0, "established": 0.7, "emerging": 0.4, "scout": 0.4}
 MEMECOIN_TIERS = {"scout", "emerging"}  # what counts toward max_memecoin_exposure_fraction (naming kept for
@@ -237,6 +255,17 @@ def _price_history_cache_path(pair: str, days: int, interval_minutes: int = kc.O
     return PRICE_HISTORY_CACHE_DIR / f"{pair}{suffix}_{days}d.json"
 
 
+def _price_history_cache_ttl_seconds(interval_minutes: int) -> int:
+    """A new bar exists roughly every interval_minutes -- serving a cached
+    signal for longer than that risks missing the exact bar a strategy like
+    ema_ribbon/donchian_channel_breakout cares about (they fire on the bar
+    a condition first becomes newly true, not on every bar it holds).
+    Capped at PRICE_HISTORY_CACHE_TTL_SECONDS, which only actually binds
+    for the daily default (1440min) -- for every shorter --interval-minutes
+    this scales the TTL down to match the bar width instead."""
+    return min(PRICE_HISTORY_CACHE_TTL_SECONDS, interval_minutes * 60)
+
+
 def _load_price_history_cache(pair: str, days: int, interval_minutes: int = kc.OHLC_DAILY_INTERVAL_MINUTES) -> list[float] | None:
     path = _price_history_cache_path(pair, days, interval_minutes)
     if not path.exists():
@@ -244,7 +273,7 @@ def _load_price_history_cache(pair: str, days: int, interval_minutes: int = kc.O
     try:
         cached = json.loads(path.read_text())
         computed_at = datetime.fromisoformat(cached["computed_at"])
-        if (datetime.now(timezone.utc) - computed_at).total_seconds() > PRICE_HISTORY_CACHE_TTL_SECONDS:
+        if (datetime.now(timezone.utc) - computed_at).total_seconds() > _price_history_cache_ttl_seconds(interval_minutes):
             return None
         return cached["closes"]
     except (json.JSONDecodeError, OSError, KeyError, ValueError, TypeError):
@@ -261,8 +290,8 @@ def _save_price_history_cache(pair: str, days: int, closes: list[float], interva
 
 def get_price_history_closes(pair: str, days: int, cached: list[float] | None = None,
                               interval_minutes: int = kc.OHLC_DAILY_INTERVAL_MINUTES) -> list[float] | None:
-    """Cached for PRICE_HISTORY_CACHE_TTL_SECONDS per (pair, days,
-    interval_minutes). Pass `cached` if the caller already did its own
+    """Cached for _price_history_cache_ttl_seconds(interval_minutes) per
+    (pair, days, interval_minutes). Pass `cached` if the caller already did its own
     _load_price_history_cache() lookup -- avoids re-reading the same cache
     file twice. Uses an impatient retry policy (2 attempts, 3s base wait)
     for the same reason the old pipeline did: this runs inside a tight cron
