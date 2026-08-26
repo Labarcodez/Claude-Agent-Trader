@@ -226,7 +226,11 @@ Before proposing any trade, check ALL of:
 - [ ] Today's cumulative trade volume + this trade < `max_daily_volume_usd`
 - [ ] At least `min_hours_between_trades_same_token` since the last trade in this pair
 - [ ] Current spread <= `max_spread_bps` and (for a market order) expected slippage <= `max_slippage_bps`
-      (get a quote first via `kraken/propose_order.py` without `--execute`, before executing)
+      (get a quote first via `kraken/propose_order.py` without `--execute`, before executing --
+      it also prints a real-fee-tier round-trip cost estimate)
+- [ ] `kraken.fees.edge_clears_costs()` -- at this size, would hitting `take_profit_pct` still net
+      comfortably (>= 2x by default) more than both legs' fees? A trade that barely clears its own
+      costs isn't worth the tail risk of a worse-than-modeled fill eating the rest.
 
 If any check fails, do not trade that signal -- log why and move on.
 

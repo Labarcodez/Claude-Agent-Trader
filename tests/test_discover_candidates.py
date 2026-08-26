@@ -110,8 +110,28 @@ class TestClassifyTier(unittest.TestCase):
 
 class TestKrakenBaseAltname(unittest.TestCase):
     """_kraken_base_altname() normalizes Kraken's legacy X/Z-prefixed asset
-    codes (e.g. "XXBT" -> "XBT") so KRAKEN_TO_COINGECKO_ID lookups work
-    without needing a live Assets API call per candidate."""
+    codes (e.g. "XXBT" -> "XBT") so KRAKEN_TO_COINGECKO_ID lookups work.
+    Prefers an authoritative asset_altnames map (from
+    fetch_kraken_asset_altnames()) when given one; falls back to a
+    length/prefix heuristic only when it isn't -- see the function's own
+    docstring for why code review flagged the heuristic-only version as a
+    silent mis-tiering risk."""
+
+    def test_uses_authoritative_map_when_given(self):
+        # a code that would defeat the heuristic (doesn't start with X/Z)
+        # resolves correctly when the real Kraken mapping is provided
+        self.assertEqual(disco._kraken_base_altname("WEIRDCODE", {"WEIRDCODE": "SOL"}), "SOL")
+
+    def test_authoritative_map_takes_precedence_over_heuristic(self):
+        # even for a code the heuristic WOULD get right, the authoritative
+        # map is checked first
+        self.assertEqual(disco._kraken_base_altname("XXDG", {"XXDG": "XDG"}), "XDG")
+
+    def test_falls_back_to_heuristic_when_code_not_in_map(self):
+        self.assertEqual(disco._kraken_base_altname("XXDG", {"SOMETHING_ELSE": "FOO"}), "XDG")
+
+    def test_falls_back_to_heuristic_when_no_map_given(self):
+        self.assertEqual(disco._kraken_base_altname("XXDG"), "XDG")
 
     def test_strips_leading_x_prefix(self):
         self.assertEqual(disco._kraken_base_altname("XXDG"), "XDG")
@@ -127,18 +147,42 @@ class TestKrakenBaseAltname(unittest.TestCase):
         # that happens to start with X or Z but isn't a legacy-prefixed one
         self.assertEqual(disco._kraken_base_altname("XRP"), "XRP")
 
+    def test_none_base_code_returns_empty_string_not_a_crash(self):
+        # a pair whose AssetPairs entry is missing "base" entirely must
+        # degrade to a lookup miss ("emerging" tier), not an uncaught
+        # TypeError from len(None) -- real gap, found by code review
+        self.assertEqual(disco._kraken_base_altname(None), "")
+        self.assertEqual(disco._kraken_base_altname(None, {"XXDG": "XDG"}), "")
+
+
+class TestFetchKrakenAssetAltnames(unittest.TestCase):
+    @patch("kraken.client.assets")
+    def test_builds_code_to_altname_map(self, mock_assets):
+        mock_assets.return_value = {"XXBT": {"altname": "XBT"}, "ZUSD": {"altname": "USD"}}
+        self.assertEqual(disco.fetch_kraken_asset_altnames(), {"XXBT": "XBT", "ZUSD": "USD"})
+
+    @patch("kraken.client.assets")
+    def test_skips_entries_with_no_altname(self, mock_assets):
+        mock_assets.return_value = {"XXBT": {"altname": "XBT"}, "WEIRD": {}}
+        self.assertEqual(disco.fetch_kraken_asset_altnames(), {"XXBT": "XBT"})
+
+    @patch("kraken.client.assets")
+    def test_kraken_api_error_degrades_to_empty_dict(self, mock_assets):
+        from kraken.client import KrakenAPIError
+        mock_assets.side_effect = KrakenAPIError("boom")
+        self.assertEqual(disco.fetch_kraken_asset_altnames(), {})
+
 
 class TestGatherCandidatesFiltering(unittest.TestCase):
     """gather_candidates() must exclude dark-pool pairs, non-USD-quoted
     pairs, offline pairs, and fiat/stablecoin bases -- only what's left is a
     meaningful discovery candidate."""
 
-    def _pairs_and_ticker(self, pairs_info, ticker_data):
-        return pairs_info, ticker_data
-
+    @patch("kraken.client.assets")
     @patch("kraken.client.ticker")
     @patch("kraken.client.asset_pairs")
-    def test_excludes_dark_pool_pairs(self, mock_pairs, mock_ticker):
+    def test_excludes_dark_pool_pairs(self, mock_pairs, mock_ticker, mock_assets):
+        mock_assets.return_value = {}
         mock_pairs.return_value = {
             "XBTUSD": {"base": "XBT", "quote": "ZUSD", "status": "online", "altname": "XBTUSD"},
             "XBTUSD.d": {"base": "XBT", "quote": "ZUSD", "status": "online", "altname": "XBTUSD.d"},
@@ -149,9 +193,11 @@ class TestGatherCandidatesFiltering(unittest.TestCase):
         self.assertIn("XBTUSD", called_pairs)
         self.assertNotIn("XBTUSD.d", called_pairs)
 
+    @patch("kraken.client.assets")
     @patch("kraken.client.ticker")
     @patch("kraken.client.asset_pairs")
-    def test_excludes_offline_pairs(self, mock_pairs, mock_ticker):
+    def test_excludes_offline_pairs(self, mock_pairs, mock_ticker, mock_assets):
+        mock_assets.return_value = {}
         mock_pairs.return_value = {
             "XBTUSD": {"base": "XBT", "quote": "ZUSD", "status": "online", "altname": "XBTUSD"},
             "DEADUSD": {"base": "DEAD", "quote": "ZUSD", "status": "cancel_only", "altname": "DEADUSD"},
@@ -162,9 +208,11 @@ class TestGatherCandidatesFiltering(unittest.TestCase):
         self.assertIn("XBTUSD", called_pairs)
         self.assertNotIn("DEADUSD", called_pairs)
 
+    @patch("kraken.client.assets")
     @patch("kraken.client.ticker")
     @patch("kraken.client.asset_pairs")
-    def test_excludes_non_usd_quoted_pairs(self, mock_pairs, mock_ticker):
+    def test_excludes_non_usd_quoted_pairs(self, mock_pairs, mock_ticker, mock_assets):
+        mock_assets.return_value = {}
         mock_pairs.return_value = {
             "XBTUSD": {"base": "XBT", "quote": "ZUSD", "status": "online", "altname": "XBTUSD"},
             "XBTEUR": {"base": "XBT", "quote": "ZEUR", "status": "online", "altname": "XBTEUR"},
@@ -175,9 +223,11 @@ class TestGatherCandidatesFiltering(unittest.TestCase):
         self.assertIn("XBTUSD", called_pairs)
         self.assertNotIn("XBTEUR", called_pairs)
 
+    @patch("kraken.client.assets")
     @patch("kraken.client.ticker")
     @patch("kraken.client.asset_pairs")
-    def test_excludes_stablecoin_and_fiat_bases(self, mock_pairs, mock_ticker):
+    def test_excludes_stablecoin_and_fiat_bases(self, mock_pairs, mock_ticker, mock_assets):
+        mock_assets.return_value = {}
         mock_pairs.return_value = {
             "XBTUSD": {"base": "XBT", "quote": "ZUSD", "status": "online", "altname": "XBTUSD"},
             "USDTZUSD": {"base": "USDT", "quote": "ZUSD", "status": "online", "altname": "USDTUSD"},
@@ -190,9 +240,11 @@ class TestGatherCandidatesFiltering(unittest.TestCase):
         self.assertNotIn("USDTZUSD", called_pairs)
         self.assertNotIn("ZEURZUSD", called_pairs)
 
+    @patch("kraken.client.assets")
     @patch("kraken.client.ticker")
     @patch("kraken.client.asset_pairs")
-    def test_computes_price_volume_and_spread_from_ticker(self, mock_pairs, mock_ticker):
+    def test_computes_price_volume_and_spread_from_ticker(self, mock_pairs, mock_ticker, mock_assets):
+        mock_assets.return_value = {}
         mock_pairs.return_value = {"XBTUSD": {"base": "XBT", "quote": "ZUSD", "status": "online", "altname": "XBTUSD"}}
         mock_ticker.return_value = {
             "XBTUSD": {"a": ["101.0", "1", "1"], "b": ["99.0", "1", "1"], "c": ["100.0", "1"],
@@ -204,13 +256,85 @@ class TestGatherCandidatesFiltering(unittest.TestCase):
         self.assertAlmostEqual(data["volume_24h_usd"], 1000 * 100.0)
         self.assertAlmostEqual(data["spread_bps"], (101.0 - 99.0) / 100.0 * 10_000)
 
+    @patch("kraken.client.assets")
     @patch("kraken.client.ticker")
     @patch("kraken.client.asset_pairs")
-    def test_pair_missing_from_ticker_response_is_skipped(self, mock_pairs, mock_ticker):
+    def test_stores_authoritative_base_altname_from_assets_endpoint(self, mock_pairs, mock_ticker, mock_assets):
+        mock_assets.return_value = {"XXBT": {"altname": "XBT"}}
+        mock_pairs.return_value = {"XXBTZUSD": {"base": "XXBT", "quote": "ZUSD", "status": "online", "altname": "XBTUSD"}}
+        mock_ticker.return_value = {
+            "XXBTZUSD": {"a": ["101.0", "1", "1"], "b": ["99.0", "1", "1"], "c": ["100.0", "1"],
+                         "v": ["10", "1000"], "p": ["100.0", "100.0"]},
+        }
+        candidates = disco.gather_candidates(make_args())
+        self.assertEqual(candidates["XXBTZUSD"]["base_altname"], "XBT")
+
+    @patch("kraken.client.assets")
+    @patch("kraken.client.ticker")
+    @patch("kraken.client.asset_pairs")
+    def test_empty_book_reports_no_spread_rather_than_a_false_zero(self, mock_pairs, mock_ticker, mock_assets):
+        # ask==bid==0 (no live quote) -- mid correctly falls back to last-trade
+        # price, but spread_bps must be None (unmeasurable), not a false "0.0bps
+        # perfectly tight" reading computed from (0-0)/last. Real bug, found by
+        # code review: evaluate_candidate()'s safety gate only rejects on
+        # spread_bps is None, so a computed 0.0 sailed straight through.
+        mock_assets.return_value = {}
+        mock_pairs.return_value = {"XBTUSD": {"base": "XBT", "quote": "ZUSD", "status": "online", "altname": "XBTUSD"}}
+        mock_ticker.return_value = {
+            "XBTUSD": {"a": ["0", "1", "1"], "b": ["0", "1", "1"], "c": ["100.0", "1"],
+                       "v": ["10", "1000"], "p": ["100.0", "100.0"]},
+        }
+        candidates = disco.gather_candidates(make_args())
+        self.assertIsNone(candidates["XBTUSD"]["spread_bps"])
+        self.assertEqual(candidates["XBTUSD"]["price_usd"], 100.0)  # mid still falls back to last, that part is correct
+
+    @patch("kraken.client.assets")
+    @patch("kraken.client.ticker")
+    @patch("kraken.client.asset_pairs")
+    def test_pair_missing_from_ticker_response_is_skipped(self, mock_pairs, mock_ticker, mock_assets):
+        mock_assets.return_value = {}
         mock_pairs.return_value = {"XBTUSD": {"base": "XBT", "quote": "ZUSD", "status": "online", "altname": "XBTUSD"}}
         mock_ticker.return_value = {}  # Ticker didn't return this pair
         candidates = disco.gather_candidates(make_args())
         self.assertEqual(candidates, {})
+
+
+class TestMarketCapsForPairs(unittest.TestCase):
+    """market_caps_for_pairs() -- the consolidated replacement for what used
+    to be three near-identical hand-written coingecko-id-resolution blocks
+    in this module, backtest/backtest_all.py, and
+    paper_trading/run_paper_cycle.py (code review, 2026-08-26: they'd
+    already started diverging)."""
+
+    def _candidates(self, **overrides):
+        base = {
+            "XBTUSD": {"base_altname": "XBT"},
+            "UNKNOWNUSD": {"base_altname": "TOTALLYUNKNOWN"},
+        }
+        base.update(overrides)
+        return base
+
+    @patch("research.discover_candidates.fetch_market_caps_usd")
+    def test_maps_result_back_to_pair_names(self, mock_fetch):
+        mock_fetch.return_value = {"bitcoin": 1_500_000_000_000}
+        result = disco.market_caps_for_pairs(self._candidates(), ["XBTUSD", "UNKNOWNUSD"])
+        self.assertEqual(result["XBTUSD"], 1_500_000_000_000)
+
+    @patch("research.discover_candidates.fetch_market_caps_usd")
+    def test_unknown_base_altname_defaults_to_zero(self, mock_fetch):
+        mock_fetch.return_value = {}
+        result = disco.market_caps_for_pairs(self._candidates(), ["UNKNOWNUSD"])
+        self.assertEqual(result["UNKNOWNUSD"], 0)
+
+    @patch("research.discover_candidates.fetch_market_caps_usd")
+    def test_calls_fetch_market_caps_once_for_the_whole_pair_list(self, mock_fetch):
+        # fetch_market_caps_usd() already dedupes internally -- this just
+        # confirms market_caps_for_pairs() doesn't fetch per-pair
+        mock_fetch.return_value = {}
+        candidates = {"A": {"base_altname": "XBT"}, "B": {"base_altname": "XBT"}}
+        disco.market_caps_for_pairs(candidates, ["A", "B"])
+        self.assertEqual(mock_fetch.call_count, 1)
+        mock_fetch.assert_called_once_with(["bitcoin", "bitcoin"])
 
 
 class TestFetchMarketCapsUsd(unittest.TestCase):

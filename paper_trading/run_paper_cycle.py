@@ -389,7 +389,23 @@ def run_cycle(args):
 
     # ---- discovery ----
     print("\nRunning discovery...")
-    candidates = disco.gather_candidates(args)
+    try:
+        candidates = disco.gather_candidates(args)
+    except kc.KrakenAPIError as e:
+        # Degrade to "no new candidates this cycle," not a crash. Before
+        # this guard, a Kraken outage/429 burst beyond gather_candidates()'s
+        # own retry budget raised uncaught here, which meant the exit-
+        # management loop below (stop-loss/take-profit/trailing-stop on
+        # EXISTING positions) never ran for this cycle either -- a real
+        # regression from "exits are never regime-gated," found by code
+        # review. `candidates = {}` still lets pricing/exits proceed
+        # normally below (they key off state["positions"], not discovery);
+        # only new entries are skipped this cycle (eligible ends up empty),
+        # which is the correct fail-safe direction -- protecting existing
+        # capital always outranks finding a new trade.
+        print(f"  ! discovery unavailable this cycle ({e}) -- skipping new entries, "
+              f"still managing existing positions", file=sys.stderr)
+        candidates = {}
     held_pairs = set(state["positions"])
     all_pairs = sorted(candidates, key=lambda p: candidates[p]["volume_24h_usd"], reverse=True)
     # Held positions are always considered regardless of the volume-rank cap
@@ -399,9 +415,7 @@ def run_cycle(args):
     # same intent).
     pairs = list(dict.fromkeys([p for p in all_pairs if p in held_pairs] + all_pairs))[: max(args.max_candidates, len(held_pairs))]
 
-    coingecko_ids = [disco.KRAKEN_TO_COINGECKO_ID[disco._kraken_base_altname(candidates[p]["base"])]
-                      for p in pairs if disco._kraken_base_altname(candidates[p]["base"]) in disco.KRAKEN_TO_COINGECKO_ID]
-    market_caps = disco.fetch_market_caps_usd(coingecko_ids)
+    market_caps = disco.market_caps_for_pairs(candidates, pairs)
 
     eligible: dict[str, dict] = {}
     rejected_count = 0
@@ -409,8 +423,7 @@ def run_cycle(args):
     discovery_history = disco.load_discovery_history(PAPER_DISCOVERY_HISTORY_PATH)
     for pair in pairs:
         data = candidates[pair]
-        cg_id = disco.KRAKEN_TO_COINGECKO_ID.get(disco._kraken_base_altname(data["base"]))
-        mcap_usd = market_caps.get(cg_id, 0) if cg_id else 0
+        mcap_usd = market_caps.get(pair, 0)
         result = disco.evaluate_candidate(pair, data, disco_args(args), mcap_usd=mcap_usd)
         final_result = result
         # Failed the normal thresholds -- try the looser scout thresholds
@@ -436,8 +449,20 @@ def run_cycle(args):
 
     tracked_pairs = set(eligible) | set(state["positions"])
 
-    time.sleep(0.5)
-    prices = current_prices(list(tracked_pairs))
+    # gather_candidates() already computed a mid-price for every pair it
+    # returned (from the same Ticker call discovery just made) -- reuse
+    # that instead of immediately re-fetching Ticker for the same pairs
+    # again. Real waste found by code review: every cycle was making a
+    # full second round of chunked Ticker calls purely to recompute a
+    # price already sitting in `candidates`, doubling Kraken API traffic
+    # for no new information. Only pairs NOT already priced by discovery
+    # (a held position that fell out of the tracked universe, e.g. a pair
+    # that went offline) still need a fresh fetch.
+    prices = {p: candidates[p]["price_usd"] for p in tracked_pairs if p in candidates}
+    still_needed = [p for p in tracked_pairs if p not in prices]
+    if still_needed:
+        time.sleep(0.5)
+        prices.update(current_prices(still_needed))
 
     unpriced_positions = [pair for pair in state["positions"] if pair not in prices]
     if unpriced_positions:

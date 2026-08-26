@@ -127,14 +127,22 @@ def fetch_market_chart(coin_id: str, days: int, vs_currency: str = "usd",
             for k, v in payload.items()}
 
 
-def fetch_ohlc_kraken(pair: str, days: int, retries: int = 3, backoff: float = 2.0) -> dict:
+def fetch_ohlc_kraken(pair: str, days: int, retries: int = 4, backoff: float = 10.0) -> dict:
     """Returns the same {"prices": [[ts_ms, close], ...]} shape
     fetch_market_chart returns, sourced from Kraken's own public OHLC
     endpoint (kraken/client.py's ohlc()) instead of CoinGecko. Already daily
     candles -- no resampling needed, unlike the CoinGecko path. This is the
     primary price-history source for backtesting/paper-trading now that this
-    project trades Kraken pairs directly. retries/backoff: see
-    kraken/client.py's ohlc()."""
+    project trades Kraken pairs directly.
+
+    retries/backoff default to kraken.client.ohlc()'s own patient default
+    (kept in sync by hand, same convention as that function's docstring) --
+    a caller must explicitly override to get paper_trading's tight-cron-loop
+    impatience, matching get_price_history_closes()'s call. Code review
+    (2026-08-26) found this wrapper previously shadowed kc.ohlc()'s default
+    with its own separate, more impatient one (3 retries/2.0s vs. 4/10.0s),
+    so fixing only kc.ohlc()'s default without also fixing this one would
+    NOT have actually changed backtest_all.py's behavior at all."""
     return {"prices": kc.ohlc(pair, days, retries=retries, backoff=backoff)}
 
 

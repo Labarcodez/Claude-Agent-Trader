@@ -136,7 +136,7 @@ class TestFetchOhlcKraken(unittest.TestCase):
         mock_ohlc.return_value = [[1000, 50000.0], [2000, 51000.0]]
         result = fh.fetch_ohlc_kraken("XBTUSD", 180)
         self.assertEqual(result, {"prices": [[1000, 50000.0], [2000, 51000.0]]})
-        mock_ohlc.assert_called_once_with("XBTUSD", 180, retries=3, backoff=2.0)
+        mock_ohlc.assert_called_once_with("XBTUSD", 180, retries=4, backoff=10.0)
 
     @patch("kraken.client.ohlc")
     def test_passes_through_retries_and_backoff_overrides(self, mock_ohlc):

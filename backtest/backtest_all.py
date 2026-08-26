@@ -68,14 +68,10 @@ def discover_eligible(args) -> list[dict]:
     candidates = disco.gather_candidates(args)
     all_pairs = sorted(candidates, key=lambda p: candidates[p]["volume_24h_usd"], reverse=True)
     pairs = all_pairs[: args.max_candidates]
-    coingecko_ids = [disco.KRAKEN_TO_COINGECKO_ID[disco._kraken_base_altname(candidates[p]["base"])]
-                      for p in pairs if disco._kraken_base_altname(candidates[p]["base"]) in disco.KRAKEN_TO_COINGECKO_ID]
-    market_caps = disco.fetch_market_caps_usd(coingecko_ids)
+    market_caps = disco.market_caps_for_pairs(candidates, pairs)
     eligible = []
     for pair in pairs:
-        cg_id = disco.KRAKEN_TO_COINGECKO_ID.get(disco._kraken_base_altname(candidates[pair]["base"]))
-        mcap_usd = market_caps.get(cg_id, 0) if cg_id else 0
-        result = disco.evaluate_candidate(pair, candidates[pair], disco_args(args), mcap_usd=mcap_usd)
+        result = disco.evaluate_candidate(pair, candidates[pair], disco_args(args), mcap_usd=market_caps.get(pair, 0))
         if result["eligible"]:
             eligible.append({"symbol": result["symbol"], "pair": pair, "tier": result["tier"]})
     return eligible
@@ -141,9 +137,16 @@ def main():
         print("Running discovery...")
         eligible = discover_eligible(args)
         print(f"{len(eligible)} eligible candidates to backtest.\n")
-        reference_pairs = {c["pair"] for c in CORE_REFERENCE_PAIRS}
+        # Compare by symbol (Kraken's altname, e.g. "XBTUSD"), not by `pair` --
+        # discover_eligible()'s `pair` is AssetPairs' canonical dict key
+        # (e.g. "XXBTZUSD"), which never equals CORE_REFERENCE_PAIRS' altname-
+        # shaped values. Comparing the raw `pair` here silently never matched,
+        # so BTC/ETH were being fetched and backtested twice under two
+        # different cache keys every run -- confirmed live (both "BTC" and
+        # "XBTUSD" rows appeared separately in the same report).
+        reference_symbols = {c["pair"] for c in CORE_REFERENCE_PAIRS}
         for c in eligible:
-            if c["pair"] in reference_pairs:
+            if c["symbol"] in reference_symbols:
                 continue  # already backtesting this pair as a reference asset above -- don't do it twice
             assets.append({"symbol": c["symbol"], "cache_key": fh.cache_key_for_kraken(c["pair"]),
                             "ref": c["pair"], "tier": c.get("tier")})

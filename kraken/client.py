@@ -57,6 +57,33 @@ class KrakenAPIError(RuntimeError):
     further."""
 
 
+def _parse_dotenv(text: str) -> dict[str, str]:
+    """Pure parsing logic for a .env file's contents, split out from
+    _load_dotenv_if_present() for testability (that function's file path is
+    hardcoded to the repo root, not something a test should depend on)."""
+    result: dict[str, str] = {}
+    for line in text.splitlines():
+        line = line.strip()
+        if not line or line.startswith("#") or "=" not in line:
+            continue
+        key, _, value = line.partition("=")
+        key = key.strip()
+        value = value.strip()
+        # Strip one matching pair of surrounding quotes -- a common .env
+        # convention (KRAKEN_API_SECRET="...") this loader previously
+        # didn't handle: the literal quote characters would silently
+        # become part of the credential, base64.b64decode() in _sign()
+        # discards them without raising (default validate=False), and the
+        # only symptom is a confusing "EAPI:Invalid signature" with
+        # nothing pointing back at the .env formatting as the cause. Found
+        # by code review.
+        if len(value) >= 2 and value[0] == value[-1] and value[0] in ("'", '"'):
+            value = value[1:-1]
+        if key:
+            result[key] = value
+    return result
+
+
 def _load_dotenv_if_present() -> None:
     """Tiny, dependency-free .env loader (this project has no python-dotenv
     dependency anywhere else, and adding one just for two variables isn't
@@ -69,14 +96,9 @@ def _load_dotenv_if_present() -> None:
     if not env_path.exists():
         return
     try:
-        for line in env_path.read_text(encoding="utf-8").splitlines():
-            line = line.strip()
-            if not line or line.startswith("#") or "=" not in line:
-                continue
-            key, _, value = line.partition("=")
-            key = key.strip()
-            if key and key not in os.environ:
-                os.environ[key] = value.strip()
+        for key, value in _parse_dotenv(env_path.read_text(encoding="utf-8")).items():
+            if key not in os.environ:
+                os.environ[key] = value
     except OSError:
         pass
 
@@ -120,7 +142,17 @@ def _is_retryable_kraken_error(errors: list) -> bool:
 
 def _request(method: str, path: str, data: dict | None = None, private: bool = False,
              retries: int = 3, backoff: float = 2.0) -> dict:
-    data = dict(data or {})
+    # urllib.parse.urlencode() stringifies a Python bool via str(), producing
+    # "True"/"False" (capitalized) rather than Kraken's documented lowercase
+    # "true"/"false" for boolean fields like AddOrder's `validate`. If
+    # Kraken's parser does an exact string match on that value (the normal
+    # convention for this kind of flag), "True" would be silently treated as
+    # not-true -- meaning propose_order.py's default, no-`--execute` quote
+    # path (which calls add_order(..., validate=True) specifically to NEVER
+    # place a real order) could place one for real. Normalized here, once,
+    # for every private call, so no other bool-valued field can hit the same
+    # gap later.
+    data = {k: ("true" if v is True else "false" if v is False else v) for k, v in (data or {}).items()}
     last_err: Exception | None = None
     for attempt in range(retries):
         try:
@@ -184,19 +216,43 @@ def assets() -> dict:
     return _request("GET", "/0/public/Assets")
 
 
-CHUNK_SIZE = 20  # keep each request URL a safe length; Kraken accepts a comma-separated pair list
+CHUNK_SIZE = 50  # Kraken pair codes are short (~6-8 chars); 50 comma-joined stays well under any
+                  # realistic URL length limit while cutting round-trips roughly 2.5x vs. a more
+                  # conservative chunk size, for the full ~630-pair universe discovery fetches every cycle.
+CHUNK_PACE_SECONDS = 0.2  # brief pacing between chunks -- avoids bursting api.kraken.com with a dozen-plus
+                           # back-to-back requests, the same lesson this project's own git history already
+                           # learned once from Jupiter's rate limiter on unpaced back-to-back calls
 
 
 def ticker(pairs: list[str]) -> dict:
     """{pair_name: {a, b, c, v, p, t, l, h, o}} (see module docstring) for as
     many pairs as fit in CHUNK_SIZE-sized batches -- mirrors
     paper_trading/run_paper_cycle.py's old Jupiter-batching approach for the
-    same reason (avoid one request per pair)."""
+    same reason (avoid one request per pair).
+
+    Kraken's Ticker endpoint can error the ENTIRE batched request over a
+    single bad pair name in it (e.g. a delisted/renamed pair) -- confirmed
+    by code review as a real risk: if a stale pair anywhere in a chunk that
+    also holds open positions caused the whole chunk to come back empty,
+    stop-loss/take-profit checks for otherwise-healthy positions sharing
+    that chunk would silently not run this cycle. On a chunk-level
+    KrakenAPIError, this falls back to one request per pair in that chunk
+    specifically, so one bad pair only ever costs itself, never its
+    chunk-mates."""
     result: dict = {}
     unique_pairs = list(dict.fromkeys(pairs))  # de-dupe, keep order
     for i in range(0, len(unique_pairs), CHUNK_SIZE):
         chunk = unique_pairs[i:i + CHUNK_SIZE]
-        result.update(_request("GET", "/0/public/Ticker", {"pair": ",".join(chunk)}))
+        if i > 0:
+            time.sleep(CHUNK_PACE_SECONDS)
+        try:
+            result.update(_request("GET", "/0/public/Ticker", {"pair": ",".join(chunk)}))
+        except KrakenAPIError:
+            for pair in chunk:
+                try:
+                    result.update(_request("GET", "/0/public/Ticker", {"pair": pair}))
+                except KrakenAPIError:
+                    continue  # this specific pair really is bad (or still rate-limited) -- skip just it
     return result
 
 
@@ -209,7 +265,7 @@ def ticker(pairs: list[str]) -> dict:
 OHLC_DAILY_INTERVAL_MINUTES = 1440
 
 
-def ohlc(pair: str, days: int, retries: int = 3, backoff: float = 2.0) -> list[list]:
+def ohlc(pair: str, days: int, retries: int = 4, backoff: float = 10.0) -> list[list]:
     """Returns up to `days` days of [timestamp_ms, close] pairs for `pair`,
     oldest first. Kraken's OHLC endpoint only returns its most recent ~720
     intervals regardless of a `since` param requesting more -- callers
@@ -219,9 +275,17 @@ def ohlc(pair: str, days: int, retries: int = 3, backoff: float = 2.0) -> list[l
 
     retries/backoff are overridable for the same reason
     backtest/fetch_history.py's _fetch() exposes them: a one-off backtest
-    run can afford patience, but paper_trading/run_paper_cycle.py's
-    per-candidate signal fetches run inside a tight cron loop where a
-    candidate this gives up on quickly just gets reconsidered next cycle."""
+    run can afford patience (hence the patient default here, matching
+    fetch_history.py's own CoinGecko default of ~60s worst case -- a
+    dropped pair silently understates a comprehensive backtest's coverage),
+    but paper_trading/run_paper_cycle.py's per-candidate signal fetches run
+    inside a tight cron loop and explicitly override to a much shorter
+    budget, where a candidate this gives up on quickly just gets
+    reconsidered next cycle. A caller that doesn't override gets the
+    patient policy -- code review (2026-08-26) found backtest_all.py was
+    silently inheriting an in-between default that was neither patient nor
+    the paper-trading override, undermining "everything eligible gets
+    backtested" without anyone deciding that trade-off."""
     result = _request("GET", "/0/public/OHLC", {"pair": pair, "interval": OHLC_DAILY_INTERVAL_MINUTES},
                        retries=retries, backoff=backoff)
     # Kraken echoes the pair back as a dict key that isn't always exactly the

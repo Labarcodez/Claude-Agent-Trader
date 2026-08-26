@@ -289,12 +289,16 @@ more. `edge_clears_costs()` checks whether a position's take-profit target,
 if hit, would still net comfortably more than both legs' fees (plus entry
 spread for a market/taker order) -- a trade that only clears its own costs
 by a hair isn't worth the tail risk of a worse-than-modeled fill eating the
-rest. `kraken/precision.py`'s `clamp_to_pair_minimums()` separately checks a
-proposed size against Kraken's own per-pair `ordermin`/`costmin` (which can
-exceed `config/risk.yaml`'s project-level `min_trade_usd` for a thin or
-expensive pair) -- `kraken/propose_order.py` runs this automatically on
-every quote, so an order that Kraken would reject on size alone says so
-before anyone runs `--execute`.
+rest. `kraken/propose_order.py` surfaces a real-fee-tier round-trip cost
+*estimate* on every quote automatically; `edge_clears_costs()` itself takes
+a take-profit target as input, so it's meant to be called from
+`trade-cycle` step 7 (which has that position-level context) rather than
+the single-order CLI. `kraken/precision.py`'s `clamp_to_pair_minimums()`
+separately checks a proposed size against Kraken's own per-pair
+`ordermin`/`costmin` (which can exceed `config/risk.yaml`'s project-level
+`min_trade_usd` for a thin or expensive pair) -- `kraken/propose_order.py`
+runs this automatically on every quote too, so an order that Kraken would
+reject on size alone says so before anyone runs `--execute`.
 
 ## Exit discipline
 

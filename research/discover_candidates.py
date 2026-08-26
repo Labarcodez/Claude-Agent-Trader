@@ -148,6 +148,20 @@ def fetch_market_caps_usd(coingecko_ids: list[str]) -> dict[str, float]:
     return {row["id"]: row.get("market_cap") or 0 for row in data if isinstance(row, dict) and row.get("id")}
 
 
+def fetch_kraken_asset_altnames() -> dict[str, str]:
+    """{raw_asset_code: altname} for every asset Kraken lists (e.g.
+    "XXBT" -> "XBT", "ZUSD" -> "USD") -- the authoritative source for the
+    same normalization _kraken_base_altname()'s heuristic approximates.
+    Fetched once per gather_candidates() call (a single bulk call, ~836
+    assets as of writing) rather than per-pair. Fail-safe: an empty dict on
+    any error, which makes every _kraken_base_altname() call fall through
+    to its heuristic -- never the reason discovery crashes."""
+    try:
+        return {code: info.get("altname") for code, info in kc.assets().items() if info.get("altname")}
+    except (kc.KrakenAPIError, OSError):
+        return {}
+
+
 def gather_candidates(args) -> dict[str, dict]:
     """Returns {pair_name: merged_asset_pair_and_ticker_data}. Every
     online, USD-quoted, non-dark-pool pair Kraken lists -- no sampling, no
@@ -161,6 +175,7 @@ def gather_candidates(args) -> dict[str, dict]:
         and info.get("base") not in EXCLUDED_BASE_ASSETS
     ]
     tickers = kc.ticker(usd_pair_names)
+    asset_altnames = fetch_kraken_asset_altnames()
 
     candidates: dict[str, dict] = {}
     for name in usd_pair_names:
@@ -174,9 +189,16 @@ def gather_candidates(args) -> dict[str, dict]:
         vol_24h_base = float(t["v"][1])
         vwap_24h = float(t["p"][1])
         mid = (ask + bid) / 2 if (ask and bid) else last
+        base = info.get("base")
         candidates[name] = {
             "pair": name,
-            "base": info.get("base"),
+            "base": base,
+            # The authoritative Kraken-code -> altname mapping (e.g. "XXBT"
+            # -> "XBT"), computed once here rather than by every caller
+            # re-deriving it from a heuristic -- see _kraken_base_altname()
+            # for why a per-caller heuristic was a real, code-review-found
+            # risk (a wrong tier classification with no error raised).
+            "base_altname": _kraken_base_altname(base, asset_altnames),
             "altname": info.get("altname"),
             "wsname": info.get("wsname"),
             "status": info.get("status"),
@@ -186,21 +208,65 @@ def gather_candidates(args) -> dict[str, dict]:
             "bid_usd": bid,
             "volume_24h_base": vol_24h_base,
             "volume_24h_usd": vol_24h_base * vwap_24h if vwap_24h else vol_24h_base * mid,
-            "spread_bps": ((ask - bid) / mid) * 10_000 if mid else None,
+            # Requires a REAL ask AND bid, not just a nonzero mid -- mid
+            # falls back to last-trade price when the book is empty
+            # (ask==bid==0), and (0-0)/last computes a false "perfectly
+            # tight" 0.0bps spread for a pair with no live quote at all,
+            # instead of the missing-data signal evaluate_candidate()'s
+            # safety gate is supposed to catch. Real bug, found by code
+            # review: this let a stale/one-sided book sail through the
+            # spread check as if it were the tightest market on Kraken.
+            "spread_bps": ((ask - bid) / mid) * 10_000 if (ask and bid and mid) else None,
         }
     return candidates
 
 
-def _kraken_base_altname(base_code: str) -> str:
-    """Kraken's raw asset codes carry a legacy "X"/"Z" prefix for some
-    assets (e.g. "XXBT" for Bitcoin, "ZUSD" for US Dollar) that its own
-    altname strips (e.g. "XBT"). KRAKEN_TO_COINGECKO_ID is keyed by altname,
-    so this normalizes the common-prefix cases without needing a live
-    Assets API call for every base code -- Kraken's own convention is
-    documented as: strip a leading "X" or "Z" if the remaining string is
-    still a recognizable code. Falls back to the raw code unchanged if
-    stripping doesn't produce anything in the table (see classify_tier()'s
-    fallback to "emerging" either way)."""
+def market_caps_for_pairs(candidates: dict[str, dict], pairs: list[str]) -> dict[str, float]:
+    """Bulk market-cap lookup for `pairs`, keyed by PAIR name (not
+    coingecko id) for direct use by callers. Consolidates what used to be
+    three near-identical hand-written copies of this block (this module's
+    own main(), backtest/backtest_all.py, paper_trading/run_paper_cycle.py)
+    -- code review (2026-08-26) found they'd already started diverging
+    (one included held positions outside the volume-rank cap, the others
+    didn't), a real drift risk for logic that determines position sizing
+    via classify_tier(). Returns 0 for any pair whose base asset isn't in
+    KRAKEN_TO_COINGECKO_ID, matching classify_tier()'s existing "emerging"
+    fallback for an unknown/zero mcap."""
+    coingecko_ids = [
+        KRAKEN_TO_COINGECKO_ID[candidates[p]["base_altname"]]
+        for p in pairs if candidates[p].get("base_altname") in KRAKEN_TO_COINGECKO_ID
+    ]
+    market_caps_by_id = fetch_market_caps_usd(coingecko_ids)
+    result = {}
+    for p in pairs:
+        cg_id = KRAKEN_TO_COINGECKO_ID.get(candidates[p].get("base_altname"))
+        result[p] = market_caps_by_id.get(cg_id, 0) if cg_id else 0
+    return result
+
+
+def _kraken_base_altname(base_code: str | None, asset_altnames: dict[str, str] | None = None) -> str:
+    """Normalizes a raw Kraken asset code (e.g. "XXBT") to its altname (e.g.
+    "XBT") -- KRAKEN_TO_COINGECKO_ID is keyed by altname. Prefers Kraken's
+    own authoritative Assets-endpoint mapping (`asset_altnames`, from
+    fetch_kraken_asset_altnames() -- gather_candidates() fetches this once
+    and passes it through) when available.
+
+    Falls back to a length/prefix heuristic ("strip a leading X or Z if the
+    remaining string is a recognizable code") only when no authoritative
+    map is available (e.g. a direct/test call, or the Assets call itself
+    failed) -- kept for exactly that fallback case, not as the primary
+    path anymore. Code review (2026-08-26) found the heuristic alone,
+    reimplemented independently by 3+ call sites, could silently
+    mis-normalize a code that doesn't fit its assumed shape, mis-tiering a
+    real position with no error raised -- the authoritative map doesn't
+    have that failure mode since it's Kraken's own data, not a guess.
+
+    None-safe (a pair with a missing `base` field degrades to "emerging"
+    tier via a lookup miss, not an uncaught TypeError)."""
+    if base_code is None:
+        return ""
+    if asset_altnames and base_code in asset_altnames:
+        return asset_altnames[base_code]
     if base_code in KRAKEN_TO_COINGECKO_ID:
         return base_code
     if len(base_code) > 3 and base_code[0] in ("X", "Z"):
@@ -365,16 +431,13 @@ def main():
     print(f"{len(candidates)} online USD pairs found; evaluating {len(pairs)} (--max-candidates, "
           f"highest 24h volume first).\n")
 
-    coingecko_ids = [KRAKEN_TO_COINGECKO_ID[_kraken_base_altname(candidates[p]["base"])]
-                      for p in pairs if _kraken_base_altname(candidates[p]["base"]) in KRAKEN_TO_COINGECKO_ID]
-    market_caps = fetch_market_caps_usd(coingecko_ids)
+    market_caps = market_caps_for_pairs(candidates, pairs)
 
     history = load_discovery_history()
     eligible, rejected = [], []
     for i, pair in enumerate(pairs, 1):
         data = candidates[pair]
-        cg_id = KRAKEN_TO_COINGECKO_ID.get(_kraken_base_altname(data["base"]))
-        mcap_usd = market_caps.get(cg_id, 0) if cg_id else 0
+        mcap_usd = market_caps.get(pair, 0)
         print(f"  [{i}/{len(pairs)}] {data.get('altname', pair):>12}  {pair}")
         result = evaluate_candidate(pair, data, args, mcap_usd=mcap_usd)
         result["data"]["trend"] = record_and_compute_trend(pair, result["symbol"], result["data"], history)

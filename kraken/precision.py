@@ -19,11 +19,20 @@ def round_volume(volume: float, lot_decimals: int | None) -> float:
     """Floors (never rounds up) to the pair's lot_decimals -- never claim to
     trade more base-currency volume than was actually intended/affordable.
     Rounding up even by one unit in the last decimal place could turn an
-    order that fit within available cash into one that doesn't."""
+    order that fit within available cash into one that doesn't.
+
+    The tiny epsilon before flooring corrects binary floating-point
+    representation noise, not the actual value: 0.29 * 100 evaluates to
+    28.999999999999996 in IEEE 754 double precision, so a bare
+    math.floor() truncates a genuinely-intended 0.29 down to 0.28 -- a full
+    extra tick lost to a representation artifact, not the volume the
+    caller actually asked for. 1e-9 is far below any real trading
+    quantity's precision, so it only ever corrects this kind of
+    near-integer noise, never a genuinely-intended smaller value."""
     if lot_decimals is None or volume <= 0:
         return volume
     factor = 10 ** lot_decimals
-    return math.floor(volume * factor) / factor
+    return math.floor(volume * factor + 1e-9) / factor
 
 
 def round_price(price: float, pair_decimals: int | None) -> float:

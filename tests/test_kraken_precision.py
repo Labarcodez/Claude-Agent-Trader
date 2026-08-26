@@ -24,6 +24,13 @@ class TestRoundVolume(unittest.TestCase):
         self.assertEqual(kp.round_volume(0.0, 4), 0.0)
         self.assertEqual(kp.round_volume(-1.0, 4), -1.0)
 
+    def test_binary_float_representation_noise_does_not_truncate_an_extra_tick(self):
+        # 0.29 * 100 == 28.999999999999996 in IEEE 754 double precision --
+        # a bare floor() truncates this to 0.28, silently losing a full
+        # tick of a genuinely-intended 0.29. Real bug, found by code review.
+        self.assertAlmostEqual(kp.round_volume(0.29, 2), 0.29, places=8)
+        self.assertAlmostEqual(kp.round_volume(2.005, 2), 2.00, places=8)
+
 
 class TestRoundPrice(unittest.TestCase):
     def test_rounds_to_nearest_not_floored(self):
