@@ -130,6 +130,39 @@ class TestOhlc(unittest.TestCase):
         self.assertEqual(len(result), 3)
         self.assertEqual(result, [[7000, 107.0], [8000, 108.0], [9000, 109.0]])
 
+    @patch("kraken.client._request")
+    def test_rejects_an_interval_kraken_does_not_support(self, mock_request):
+        with self.assertRaises(ValueError):
+            kc.ohlc("XBTUSD", 1, interval_minutes=7)  # not one of Kraken's supported OHLC intervals
+        mock_request.assert_not_called()  # must fail before ever making the request
+
+    @patch("kraken.client._request")
+    def test_passes_the_requested_interval_through_to_the_request(self, mock_request):
+        mock_request.return_value = {"XXBTZUSD": [], "last": 0}
+        kc.ohlc("XBTUSD", 1, interval_minutes=5)
+        _, _, data = mock_request.call_args[0]
+        self.assertEqual(data["interval"], 5)
+
+    @patch("urllib.request.urlopen")
+    def test_bar_count_for_days_scales_with_interval_not_fixed_to_daily(self, mock_urlopen):
+        # 1 day of 5-minute bars = 288 bars, not 1 -- days always means "how
+        # many days of history," converted to a bar count appropriate for
+        # the requested interval, so existing daily callers (interval=1440,
+        # 1 bar/day) see no behavior change at all.
+        candles = [[i, "1", "1", "1", str(100 + i), "1", "1", 1] for i in range(300)]
+        mock_urlopen.return_value = self._fake_response({"error": [], "result": {"XXBTZUSD": candles, "last": 299}})
+        result = kc.ohlc("XBTUSD", days=1, interval_minutes=5)
+        self.assertEqual(len(result), 288)
+
+    @patch("urllib.request.urlopen")
+    def test_short_interval_is_capped_by_whatever_kraken_actually_returned(self, mock_urlopen):
+        # asking for more days than the ~720-bar ceiling can cover at this
+        # interval must not error or pad -- just return what's available
+        candles = [[i, "1", "1", "1", str(100 + i), "1", "1", 1] for i in range(50)]
+        mock_urlopen.return_value = self._fake_response({"error": [], "result": {"XXBTZUSD": candles, "last": 49}})
+        result = kc.ohlc("XBTUSD", days=180, interval_minutes=5)  # 180d of 5m bars would be ~51,840 -- far more than exists
+        self.assertEqual(len(result), 50)
+
     @patch("urllib.request.urlopen")
     def test_kraken_error_raises(self, mock_urlopen):
         mock_urlopen.return_value = self._fake_response({"error": ["EQuery:Unknown asset pair"], "result": {}})

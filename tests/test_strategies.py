@@ -103,6 +103,87 @@ class TestRsiMeanReversionTrendFiltered(unittest.TestCase):
         self.assertEqual(strat.rsi_mean_reversion_trend_filtered(closes, len(closes) - 1, {}), "hold")
 
 
+class TestStochasticPercentK(unittest.TestCase):
+    def test_none_when_insufficient_data(self):
+        self.assertIsNone(strat._stochastic_percent_k([1.0, 2.0], 5))
+
+    def test_at_the_window_high_reads_100(self):
+        self.assertAlmostEqual(strat._stochastic_percent_k([1.0, 2.0, 3.0, 10.0], 4), 100.0)
+
+    def test_at_the_window_low_reads_0(self):
+        self.assertAlmostEqual(strat._stochastic_percent_k([10.0, 3.0, 2.0, 1.0], 4), 0.0)
+
+    def test_flat_window_reads_50_not_a_crash(self):
+        self.assertAlmostEqual(strat._stochastic_percent_k([5.0, 5.0, 5.0], 3), 50.0)
+
+
+class TestStochasticOscillator(unittest.TestCase):
+    def test_hold_when_insufficient_history(self):
+        self.assertEqual(strat.stochastic_oscillator([100.0] * 5, 4, {}, k_window=14, d_window=3), "hold")
+
+    def test_buy_after_sustained_decline_to_the_range_low(self):
+        closes = [100.0] * 10 + [100 - i for i in range(20)]
+        self.assertEqual(strat.stochastic_oscillator(closes, len(closes) - 1, {}, k_window=14, d_window=3), "buy")
+
+    def test_sell_after_sustained_rally_to_the_range_high(self):
+        closes = [100.0] * 10 + [100 + i for i in range(20)]
+        self.assertEqual(strat.stochastic_oscillator(closes, len(closes) - 1, {}, k_window=14, d_window=3), "sell")
+
+    def test_hold_in_the_middle_of_the_range(self):
+        closes = [100.0, 105.0, 95.0, 102.0, 98.0] * 5
+        self.assertEqual(strat.stochastic_oscillator(closes, len(closes) - 1, {}, k_window=14, d_window=3), "hold")
+
+
+class TestDonchianChannelBreakout(unittest.TestCase):
+    def test_hold_when_insufficient_history(self):
+        self.assertEqual(strat.donchian_channel_breakout([100.0] * 5, 4, {}, window=20), "hold")
+
+    def test_hold_on_flat_series(self):
+        closes = [100.0] * 25
+        self.assertEqual(strat.donchian_channel_breakout(closes, len(closes) - 1, {}, window=20), "hold")
+
+    def test_buy_on_a_new_window_high(self):
+        closes = [100.0] * 20 + [105.0]  # a fresh high above the entire prior 20-bar window
+        self.assertEqual(strat.donchian_channel_breakout(closes, len(closes) - 1, {}, window=20), "buy")
+
+    def test_sell_on_a_new_window_low(self):
+        closes = [100.0] * 20 + [95.0]
+        self.assertEqual(strat.donchian_channel_breakout(closes, len(closes) - 1, {}, window=20), "sell")
+
+    def test_fires_on_any_new_extreme_no_confirmation_buffer(self):
+        # unlike volatility_breakout, the tiniest new high must fire --
+        # no volatility-scaled buffer to clear first
+        closes = [100.0] * 20 + [100.001]
+        self.assertEqual(strat.donchian_channel_breakout(closes, len(closes) - 1, {}, window=20), "buy")
+
+
+class TestEmaRibbon(unittest.TestCase):
+    def test_hold_when_insufficient_history(self):
+        self.assertEqual(strat.ema_ribbon([100.0] * 10, 9, {}, fast=8, mid=21, slow=55), "hold")
+
+    def test_hold_on_perfectly_flat_series(self):
+        closes = [100.0] * 120
+        for i in range(len(closes)):
+            self.assertEqual(strat.ema_ribbon(closes, i, {}, fast=8, mid=21, slow=55), "hold")
+
+    def test_buy_appears_on_a_sustained_ramp(self):
+        closes = [100.0] * 60 + [100 + i * 2 for i in range(60)]
+        signals = [strat.ema_ribbon(closes, i, {}, fast=8, mid=21, slow=55) for i in range(len(closes))]
+        self.assertIn("buy", signals)
+
+    def test_sell_appears_on_a_sustained_decline(self):
+        closes = [100.0] * 60 + [100 - i for i in range(60)]
+        signals = [strat.ema_ribbon(closes, i, {}, fast=8, mid=21, slow=55) for i in range(len(closes))]
+        self.assertIn("sell", signals)
+
+    def test_only_fires_on_the_transition_not_every_bar_while_aligned(self):
+        # a long-established ramp: the bullish alignment already existed
+        # bars ago and should not keep re-firing "buy" every subsequent bar
+        closes = [100.0] * 60 + [100 + i * 2 for i in range(80)]
+        signals = [strat.ema_ribbon(closes, i, {}, fast=8, mid=21, slow=55) for i in range(len(closes))]
+        self.assertLess(signals.count("buy"), 5, "should fire once around the transition, not on most of the ramp")
+
+
 class TestVolatilityBreakout(unittest.TestCase):
     def test_hold_when_insufficient_history(self):
         self.assertEqual(strat.volatility_breakout([100.0] * 5, 4, {}), "hold")

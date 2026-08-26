@@ -136,18 +136,37 @@ class TestFetchOhlcKraken(unittest.TestCase):
         mock_ohlc.return_value = [[1000, 50000.0], [2000, 51000.0]]
         result = fh.fetch_ohlc_kraken("XBTUSD", 180)
         self.assertEqual(result, {"prices": [[1000, 50000.0], [2000, 51000.0]]})
-        mock_ohlc.assert_called_once_with("XBTUSD", 180, retries=4, backoff=10.0)
+        mock_ohlc.assert_called_once_with("XBTUSD", 180, interval_minutes=1440, retries=4, backoff=10.0)
 
     @patch("kraken.client.ohlc")
     def test_passes_through_retries_and_backoff_overrides(self, mock_ohlc):
         mock_ohlc.return_value = []
         fh.fetch_ohlc_kraken("XBTUSD", 90, retries=2, backoff=1.5)
-        mock_ohlc.assert_called_once_with("XBTUSD", 90, retries=2, backoff=1.5)
+        mock_ohlc.assert_called_once_with("XBTUSD", 90, interval_minutes=1440, retries=2, backoff=1.5)
+
+    @patch("kraken.client.ohlc")
+    def test_passes_through_interval_minutes_for_day_trading_timeframes(self, mock_ohlc):
+        mock_ohlc.return_value = []
+        fh.fetch_ohlc_kraken("XBTUSD", 2, interval_minutes=5)
+        mock_ohlc.assert_called_once_with("XBTUSD", 2, interval_minutes=5, retries=4, backoff=10.0)
 
 
 class TestCacheKeyForKraken(unittest.TestCase):
     def test_prefixes_pair_with_kraken(self):
         self.assertEqual(fh.cache_key_for_kraken("XBTUSD"), "kraken_XBTUSD")
+
+    def test_daily_interval_keeps_the_original_unsuffixed_key(self):
+        # backward compat -- every existing cache file / doc reference to
+        # kraken_<PAIR> must stay valid for the default (daily) interval
+        self.assertEqual(fh.cache_key_for_kraken("XBTUSD", interval_minutes=1440), "kraken_XBTUSD")
+
+    def test_non_daily_interval_gets_a_distinct_suffixed_key(self):
+        self.assertEqual(fh.cache_key_for_kraken("XBTUSD", interval_minutes=60), "kraken_XBTUSD_60m")
+        self.assertEqual(fh.cache_key_for_kraken("XBTUSD", interval_minutes=5), "kraken_XBTUSD_5m")
+
+    def test_different_intervals_of_the_same_pair_never_collide(self):
+        keys = {fh.cache_key_for_kraken("XBTUSD", interval_minutes=m) for m in (5, 15, 60, 1440)}
+        self.assertEqual(len(keys), 4)
 
 
 if __name__ == "__main__":

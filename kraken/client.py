@@ -256,22 +256,39 @@ def ticker(pairs: list[str]) -> dict:
     return result
 
 
-# Kraken's supported OHLC interval values, in minutes -- 1440 = daily candles,
-# which is what every daily-scale indicator in this repo (SMA10/30, RSI14,
-# the regime filter's N-day SMA) assumes each series entry represents (see
-# backtest/fetch_history.py's _resample_to_daily() for the CoinGecko version
-# of this same assumption). Kraken's OHLC endpoint returns already-daily
-# candles at this interval -- no resampling needed here.
+# Kraken's supported OHLC interval values, in minutes. 1440 = daily candles,
+# the original (and still default) granularity every daily-scale indicator
+# in this repo (SMA10/30, RSI14, the regime filter's N-day SMA) was built
+# around. The shorter ones (5/15/60) exist for day-trading-timeframe
+# strategies (see backtest/strategies.py's day-trading additions) -- same
+# indicator math, just fed shorter bars.
 OHLC_DAILY_INTERVAL_MINUTES = 1440
+OHLC_VALID_INTERVALS_MINUTES = {1, 5, 15, 30, 60, 240, 1440, 10080, 21600}
+
+# Kraken's OHLC endpoint returns at most its most recent ~720 intervals
+# regardless of interval or a `since` param requesting more -- at a given
+# interval, that puts a hard ceiling on how many days of history are even
+# obtainable (e.g. 720 five-minute bars = 2.5 days, 720 hourly bars = 30
+# days), independent of what a caller asks for. See ohlc()'s docstring.
+OHLC_MAX_BARS_RETURNED = 720
 
 
-def ohlc(pair: str, days: int, retries: int = 4, backoff: float = 10.0) -> list[list]:
-    """Returns up to `days` days of [timestamp_ms, close] pairs for `pair`,
-    oldest first. Kraken's OHLC endpoint only returns its most recent ~720
-    intervals regardless of a `since` param requesting more -- callers
-    needing more history than that should treat this the same as any other
-    "not enough history" case (see backtest/backtest_all.py's n_points < 20
-    skip).
+def ohlc(pair: str, days: int, interval_minutes: int = OHLC_DAILY_INTERVAL_MINUTES,
+          retries: int = 4, backoff: float = 10.0) -> list[list]:
+    """Returns [timestamp_ms, close] pairs for `pair`, oldest first, at
+    `interval_minutes` granularity (default: daily). `days` means the same
+    thing regardless of interval -- "how many days of history" -- converted
+    internally to a bar count (days * 1440 / interval_minutes) so existing
+    daily callers (interval_minutes=1440) are completely unaffected by this
+    parameter's addition.
+
+    Kraken's OHLC endpoint only returns its most recent ~720 intervals
+    regardless of interval or a `since` param requesting more -- at a short
+    interval this is a real ceiling on available history no `days` value
+    can raise (5-minute bars: ~2.5 days max; 15-minute: ~7.5 days; hourly:
+    ~30 days), not just a "not enough history" edge case (see
+    backtest/backtest_all.py's n_points < 20 skip for how a caller should
+    treat getting back less than it asked for).
 
     retries/backoff are overridable for the same reason
     backtest/fetch_history.py's _fetch() exposes them: a one-off backtest
@@ -286,14 +303,18 @@ def ohlc(pair: str, days: int, retries: int = 4, backoff: float = 10.0) -> list[
     silently inheriting an in-between default that was neither patient nor
     the paper-trading override, undermining "everything eligible gets
     backtested" without anyone deciding that trade-off."""
-    result = _request("GET", "/0/public/OHLC", {"pair": pair, "interval": OHLC_DAILY_INTERVAL_MINUTES},
+    if interval_minutes not in OHLC_VALID_INTERVALS_MINUTES:
+        raise ValueError(f"interval_minutes={interval_minutes} isn't one of Kraken's supported OHLC "
+                          f"intervals: {sorted(OHLC_VALID_INTERVALS_MINUTES)}")
+    result = _request("GET", "/0/public/OHLC", {"pair": pair, "interval": interval_minutes},
                        retries=retries, backoff=backoff)
     # Kraken echoes the pair back as a dict key that isn't always exactly the
     # requested string (e.g. requesting "XBTUSD" can come back keyed
     # "XXBTZUSD") -- there's exactly one non-"last" key in the result, so
     # take whichever key that is rather than assuming an exact match.
     candles = next((v for k, v in result.items() if k != "last"), [])
-    candles = candles[-days:] if days else candles
+    bars_wanted = max(1, round(days * 1440 / interval_minutes)) if days else None
+    candles = candles[-bars_wanted:] if bars_wanted else candles
     return [[int(c[0]) * 1000, float(c[4])] for c in candles]  # c[4] = close
 
 

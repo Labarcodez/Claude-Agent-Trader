@@ -76,6 +76,7 @@ from research import discover_candidates as disco  # noqa: E402
 from backtest import fetch_history as fh  # noqa: E402
 from backtest import strategies as strat  # noqa: E402
 from kraken import client as kc  # noqa: E402
+from kraken import fees as kf  # noqa: E402
 from scripts.cycle_lock import CycleLock  # noqa: E402
 
 STATE_PATH = REPO_ROOT / "state" / "paper_portfolio.json"
@@ -660,6 +661,26 @@ def run_cycle(args):
             if size_usd > state["cash_usd"]:
                 not_traded[pair] = f"sized position ${size_usd:.2f} exceeds available cash (${state['cash_usd']:.2f})"
                 continue
+            # Fee-aware edge check: IF this position hits its profit target,
+            # would the gain still clear both legs' round-trip cost by a
+            # healthy margin? A trade that only clears its own costs by a
+            # hair isn't worth the tail risk of a worse-than-modeled fill
+            # eating the rest -- see kraken/fees.py's edge_clears_costs()
+            # and docs/STRATEGY.md "Fee-aware execution". Scout tier's
+            # target is a MULTIPLE of cost basis (profit_take_multiple,
+            # e.g. 2.0x = +100%), not a flat take_profit_pct, so it's
+            # converted to the equivalent percentage here.
+            target_pct = (args.profit_take_multiple - 1) if is_scout else args.take_profit_pct
+            edge_check = kf.edge_clears_costs(
+                size_usd, target_pct, entry_fee_bps=args.fee_bps, exit_fee_bps=args.fee_bps,
+                entry_spread_bps=args.slippage_bps, min_edge_multiple=args.min_edge_to_cost_multiple,
+            )
+            if not edge_check["clears"]:
+                not_traded[pair] = (f"edge-to-cost multiple {edge_check['edge_to_cost_multiple']:.2f}x < "
+                                     f"min {args.min_edge_to_cost_multiple:.1f}x (round-trip cost "
+                                     f"${edge_check['round_trip_cost_usd']:.3f} vs. ${edge_check['gross_profit_at_take_profit_usd']:.3f} "
+                                     f"expected gross gain at target) -- not worth the fees even if the target hits")
+                continue
             if tier in MEMECOIN_TIERS:
                 current_exposure = memecoin_exposure_usd(state, prices)
                 if current_exposure + size_usd > args.max_memecoin_exposure_fraction * port_value:
@@ -817,6 +838,10 @@ def main():
     ap.add_argument("--slippage-bps", dest="slippage_bps", type=float, default=20.0,
                      help="Lower than the old 50bps default -- Kraken's major-pair spreads are typically much "
                           "tighter than a Solana DEX pool's price impact.")
+    ap.add_argument("--min-edge-to-cost-multiple", dest="min_edge_to_cost_multiple", type=float, default=2.0,
+                     help="Matches kraken/fees.py's edge_clears_costs() own default -- a position's expected "
+                          "gross profit at its take-profit target must be at least this many multiples of the "
+                          "round-trip fee+spread cost, or it's rejected as not worth the tail risk.")
     # discovery safety thresholds -- mirrors config/discovery.yaml
     ap.add_argument("--min-24h-volume-usd", dest="min_24h_volume_usd", type=float, default=1_000_000)
     ap.add_argument("--max-spread-bps", dest="max_spread_bps", type=float, default=50.0)

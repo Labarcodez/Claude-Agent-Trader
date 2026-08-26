@@ -127,13 +127,21 @@ def fetch_market_chart(coin_id: str, days: int, vs_currency: str = "usd",
             for k, v in payload.items()}
 
 
-def fetch_ohlc_kraken(pair: str, days: int, retries: int = 4, backoff: float = 10.0) -> dict:
+def fetch_ohlc_kraken(pair: str, days: int, interval_minutes: int = kc.OHLC_DAILY_INTERVAL_MINUTES,
+                       retries: int = 4, backoff: float = 10.0) -> dict:
     """Returns the same {"prices": [[ts_ms, close], ...]} shape
     fetch_market_chart returns, sourced from Kraken's own public OHLC
-    endpoint (kraken/client.py's ohlc()) instead of CoinGecko. Already daily
-    candles -- no resampling needed, unlike the CoinGecko path. This is the
-    primary price-history source for backtesting/paper-trading now that this
-    project trades Kraken pairs directly.
+    endpoint (kraken/client.py's ohlc()) instead of CoinGecko. Already
+    at-the-requested-granularity candles -- no resampling needed, unlike
+    the CoinGecko path. This is the primary price-history source for
+    backtesting/paper-trading now that this project trades Kraken pairs
+    directly.
+
+    interval_minutes defaults to daily (unchanged behavior for every
+    existing caller) -- pass e.g. 60/15/5 for day-trading-timeframe
+    strategies. See kraken.client.ohlc()'s docstring for the real ceiling
+    on how much history a short interval can actually return (Kraken's
+    OHLC endpoint caps at ~720 bars regardless of interval).
 
     retries/backoff default to kraken.client.ohlc()'s own patient default
     (kept in sync by hand, same convention as that function's docstring) --
@@ -143,11 +151,18 @@ def fetch_ohlc_kraken(pair: str, days: int, retries: int = 4, backoff: float = 1
     with its own separate, more impatient one (3 retries/2.0s vs. 4/10.0s),
     so fixing only kc.ohlc()'s default without also fixing this one would
     NOT have actually changed backtest_all.py's behavior at all."""
-    return {"prices": kc.ohlc(pair, days, retries=retries, backoff=backoff)}
+    return {"prices": kc.ohlc(pair, days, interval_minutes=interval_minutes, retries=retries, backoff=backoff)}
 
 
-def cache_key_for_kraken(pair: str) -> str:
-    return f"kraken_{pair}"
+def cache_key_for_kraken(pair: str, interval_minutes: int = kc.OHLC_DAILY_INTERVAL_MINUTES) -> str:
+    """Daily (the original, still-default granularity) keeps the original
+    unsuffixed cache key -- every existing cache file and every test/doc
+    reference to `kraken_<PAIR>` stays valid. Any other interval gets its
+    own suffixed key (e.g. `kraken_XBTUSD_60m`) so different timeframes of
+    the same pair never collide in backtest/cache/."""
+    if interval_minutes == kc.OHLC_DAILY_INTERVAL_MINUTES:
+        return f"kraken_{pair}"
+    return f"kraken_{pair}_{interval_minutes}m"
 
 
 def save_cache(cache_key: str, days: int, payload: dict) -> Path:
@@ -163,13 +178,18 @@ def main():
     group.add_argument("--kraken-pair", help="Kraken pair, e.g. XBTUSD, ETHUSD, SOLUSD (primary source)")
     group.add_argument("--coin", help="CoinGecko coin id, e.g. bitcoin, ethereum -- for mcap lookups only")
     ap.add_argument("--days", type=int, default=180, help="Number of days of history")
+    ap.add_argument("--interval-minutes", type=int, default=kc.OHLC_DAILY_INTERVAL_MINUTES,
+                     choices=sorted(kc.OHLC_VALID_INTERVALS_MINUTES),
+                     help="Only used with --kraken-pair. Default 1440 (daily). A short interval has a real ceiling "
+                          "on obtainable history regardless of --days -- see kraken.client.ohlc()'s docstring "
+                          "(e.g. 5-minute bars: ~2.5 days max, 15-minute: ~7.5 days, hourly: ~30 days).")
     ap.add_argument("--vs", default="usd", help="Only used with --coin -- Kraken pairs are already USD-quoted")
     args = ap.parse_args()
 
     if args.kraken_pair:
-        cache_key = cache_key_for_kraken(args.kraken_pair)
-        print(f"Fetching {args.days}d of {args.kraken_pair} history from Kraken...")
-        payload = fetch_ohlc_kraken(args.kraken_pair, args.days)
+        cache_key = cache_key_for_kraken(args.kraken_pair, args.interval_minutes)
+        print(f"Fetching {args.days}d of {args.kraken_pair} history from Kraken ({args.interval_minutes}min bars)...")
+        payload = fetch_ohlc_kraken(args.kraken_pair, args.days, interval_minutes=args.interval_minutes)
     else:
         cache_key = args.coin
         print(f"Fetching {args.days}d of {cache_key}/{args.vs} history from CoinGecko...")

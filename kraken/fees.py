@@ -65,14 +65,28 @@ def parse_fee_tier(trade_volume_result: dict, pair: str, default_taker_fee_bps: 
                               "nextfee": "0.2400", "nextvolume": "250000.0000", "tiervolume": "0.0000"}},
          "fees_maker": {"<pair>": {"fee": "0.1600", ...}}}
 
-    Falls back to the given defaults if the pair isn't present in the
-    response -- e.g. an account that's never traded that pair before -- so
-    a lookup miss degrades to a conservative estimate instead of crashing
-    sizing math. Check `used_default` if the caller needs to know which
-    happened."""
+    Falls back to the given defaults if the pair genuinely isn't present in
+    the response -- e.g. an account that's never traded that pair before --
+    so a lookup miss degrades to a conservative estimate instead of
+    crashing sizing math. Check `used_default` if the caller needs to know
+    which happened.
+
+    `fees`/`fees_maker` are keyed by Kraken's CANONICAL pair name (e.g.
+    "XXBTZUSD"), which usually differs from the altname a caller passes in
+    as `pair` (e.g. "XBTUSD") -- the same Ticker/AssetPairs key-mismatch
+    class of bug already found and fixed in kraken/propose_order.py and
+    backtest/backtest_all.py. A dict-lookup-by-exact-pair-string here
+    silently returned "not found" even when the real fee data was sitting
+    right there under a different key, making this ALWAYS report the
+    generic default regardless of the account's real, live fee tier --
+    confirmed live: a real account with actual non-default fees (0.80%
+    taker / 0.40% maker) parsed as used_default=True before this fix.
+    TradeVolume requests exactly one pair, so `fees`/`fees_maker` each
+    contain exactly one entry -- take whichever key is actually there
+    rather than assuming it matches `pair` verbatim."""
     result = trade_volume_result.get("result", trade_volume_result) if isinstance(trade_volume_result, dict) else {}
-    taker = (result.get("fees") or {}).get(pair) or {}
-    maker = (result.get("fees_maker") or {}).get(pair) or {}
+    taker = next(iter((result.get("fees") or {}).values()), {})
+    maker = next(iter((result.get("fees_maker") or {}).values()), {})
 
     taker_bps = _pct_str_to_bps(taker.get("fee"))
     maker_bps = _pct_str_to_bps(maker.get("fee"))

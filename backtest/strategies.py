@@ -191,6 +191,99 @@ def bollinger_mean_reversion(closes: list[float], i: int, state: dict, window: i
     return "hold"
 
 
+def _stochastic_percent_k(closes: list[float], window: int) -> float | None:
+    """Where the latest close sits within its trailing `window`-bar
+    high-low range, as a percentage (0 = at the window's low, 100 = at its
+    high). Uses CLOSING prices for the window's high/low -- this repo's
+    strategy functions only ever see closes, not full OHLC, the same
+    convention volatility_breakout's "recent high/low" already uses."""
+    if len(closes) < window:
+        return None
+    recent = closes[-window:]
+    lo, hi = min(recent), max(recent)
+    if hi == lo:
+        return 50.0  # flat window -- neither oversold nor overbought
+    return (closes[-1] - lo) / (hi - lo) * 100
+
+
+def stochastic_oscillator(closes: list[float], i: int, state: dict, k_window: int = 14, d_window: int = 3,
+                          oversold: float = 20, overbought: float = 80) -> str:
+    """The "slow stochastic" %D line (a d_window-period SMA of %K, the raw
+    oscillator) crossing its oversold/overbought thresholds. Distinct from
+    rsi_mean_reversion: RSI measures the size/speed of recent gains vs.
+    losses, while %K measures WHERE price sits in its recent range --
+    two different questions that can disagree (e.g. a slow grind to a
+    range high reads high on %K without necessarily reading overbought on
+    RSI's momentum measure). Smoothing over d_window bars (not just the raw
+    %K) reduces single-bar noise, the same reason MACD smooths its own line
+    with a signal-period EMA."""
+    window = closes[: i + 1]
+    k_values = [_stochastic_percent_k(window[: len(window) - j], k_window) for j in range(d_window)]
+    if any(k is None for k in k_values):
+        return "hold"
+    d_value = sum(k_values) / len(k_values)
+    if d_value <= oversold:
+        return "buy"
+    if d_value >= overbought:
+        return "sell"
+    return "hold"
+
+
+def donchian_channel_breakout(closes: list[float], i: int, state: dict, window: int = 20) -> str:
+    """Classic Donchian-channel ("turtle trading") breakout: buy on ANY new
+    `window`-bar high, sell on any new `window`-bar low -- no confirmation
+    beyond the extreme itself. Distinct from volatility_breakout, which
+    requires clearing the recent high/low by a volatility-scaled buffer
+    before firing: Donchian reacts to every new extreme (more trades, more
+    false breakouts in chop), volatility_breakout only to ones that clear
+    the noise floor (fewer trades, better-confirmed ones). Worth comparing
+    directly against volatility_breakout's real (non-drift) backtest
+    results -- see docs/STRATEGY.md "Trade frequency, not just trade
+    quality" for why firing rate matters as much as the return number."""
+    window_vals = closes[: i + 1]
+    if len(window_vals) < window + 1:
+        return "hold"
+    prior = window_vals[-(window + 1):-1]
+    price = window_vals[-1]
+    if price > max(prior):
+        return "buy"
+    if price < min(prior):
+        return "sell"
+    return "hold"
+
+
+def ema_ribbon(closes: list[float], i: int, state: dict, fast: int = 8, mid: int = 21, slow: int = 55) -> str:
+    """Three-EMA trend-confirmation ribbon: fires only on the BAR WHERE the
+    fast/mid/slow EMAs newly align bullishly (fast > mid > slow) or
+    bearishly (fast < mid < slow) -- not on every bar the alignment holds,
+    the same "fire on the transition" shape sma_crossover and
+    macd_crossover already use. Requiring all three to agree makes this
+    smoother/more selective than sma_crossover's single fast/slow cross, at
+    the cost of confirming a reversal a bit later."""
+    window = closes[: i + 1]
+    fast_ema = ema_series(window, fast)
+    mid_ema = ema_series(window, mid)
+    slow_ema = ema_series(window, slow)
+    if fast_ema is None or mid_ema is None or slow_ema is None:
+        return "hold"
+    bullish = fast_ema[-1] > mid_ema[-1] > slow_ema[-1]
+    bearish = fast_ema[-1] < mid_ema[-1] < slow_ema[-1]
+
+    prev_window = window[:-1]
+    prev_fast = ema_series(prev_window, fast)
+    prev_mid = ema_series(prev_window, mid)
+    prev_slow = ema_series(prev_window, slow)
+    if prev_fast is None or prev_mid is None or prev_slow is None:
+        return "hold"  # not enough history yet to know whether this is a NEW alignment or a pre-existing one
+    prev_bullish = prev_fast[-1] > prev_mid[-1] > prev_slow[-1]
+    prev_bearish = prev_fast[-1] < prev_mid[-1] < prev_slow[-1]
+    if bullish and not prev_bullish:
+        return "buy"
+    if bearish and not prev_bearish:
+        return "sell"
+    return "hold"
+
+
 def volatility_breakout(closes: list[float], i: int, state: dict, lookback: int = 20,
                          breakout_mult: float = 1.0) -> str:
     """Buy when price breaks above the recent high by more than breakout_mult *
@@ -307,6 +400,9 @@ STRATEGIES = {
     "volatility_breakout": volatility_breakout,
     "macd_crossover": macd_crossover,
     "bollinger_mean_reversion": bollinger_mean_reversion,
+    "stochastic_oscillator": stochastic_oscillator,
+    "donchian_channel_breakout": donchian_channel_breakout,
+    "ema_ribbon": ema_ribbon,
     "adaptive_ensemble": adaptive_ensemble,
     "adaptive_ensemble_fast": adaptive_ensemble_fast,
 }
