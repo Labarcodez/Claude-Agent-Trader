@@ -776,11 +776,20 @@ def main():
                      help="mirrors config/discovery.yaml's max_candidates_per_cycle -- set comfortably above "
                           "Kraken's current USD-pair count so this is a safety ceiling, not an active truncation.")
     ap.add_argument("--history-days", type=int, default=90)
-    ap.add_argument("--strategy", choices=list(strat.STRATEGIES), default="adaptive_ensemble",
-                     help="Which backtest/strategies.py strategy to paper-trade -- defaults to the live default. "
-                          "Override to build a REAL paper track record (closed round trips, not a backtest's "
-                          "mark-to-market snapshot) for a candidate like macd_crossover before trusting its "
-                          "backtest numbers -- see docs/STRATEGY.md's caution on that strategy's results.")
+    ap.add_argument("--strategy", choices=list(strat.STRATEGIES), default="rsi_mean_reversion",
+                     help="Which backtest/strategies.py strategy to paper-trade. Was adaptive_ensemble (still the "
+                          "live default in config/risk.yaml/trade-cycle -- this flag does NOT change that, only "
+                          "what gets paper-traded) until 2026-08-26: 170 live paper cycles produced zero trades "
+                          "beyond the two opened in cycle 1, and a same-day backtest cut confirmed why -- "
+                          "adaptive_ensemble only fires a real (non-drift) trade on 38.9%% of the live-eligible "
+                          "universe over a full 180-day window, the lowest firing rate of any strategy with a "
+                          "clean (non-unrealized-inflated) track record. rsi_mean_reversion fires on 54.5%% with "
+                          "an equally clean +25.67%% avg return / 100%% win rate on real closed trades (0/18 "
+                          "showed the unrealized-position inflation macd_crossover's headline number turned out "
+                          "to be mostly made of) -- see docs/STRATEGY.md's 'Current strategies' for the full "
+                          "comparison. This is a paper-trading default change based on real evidence, not yet a "
+                          "live-trading recommendation -- CLAUDE.md rule 5 still requires this strategy build its "
+                          "own real paper track record (not just a backtest) before it's a candidate for that.")
     # mirrors config/risk.yaml -- keep in sync by hand
     ap.add_argument("--max-position-fraction", dest="max_position_fraction", type=float, default=0.30)
     ap.add_argument("--max-position-usd", dest="max_position_usd", type=float, default=20.0)

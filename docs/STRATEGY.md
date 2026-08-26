@@ -140,17 +140,33 @@ universe changes.
   markets, whipsaws (many small losing trades) in sideways/choppy markets.
 - **`rsi_mean_reversion`** -- buys oversold conditions, sells overbought.
   Good in range-bound markets, fights strong trends (can keep "buying the
-  dip" through a real downtrend).
+  dip" through a real downtrend). **The `paper_trading/run_paper_cycle.py`
+  default since 2026-08-26** (see "Trade frequency, not just trade quality"
+  below for why) -- still not the *live* default (that stays
+  `adaptive_ensemble` in `config/risk.yaml`/`trade-cycle` until this builds
+  its own real paper track record, per CLAUDE.md rule 5).
 - **`volatility_breakout`** -- buys new highs with confirming volatility,
   sells new lows. Momentum-continuation; sensitive to lookback tuning and
-  false breakouts.
+  false breakouts. **Looked strong by raw average return in an early
+  2026-08-26 pass, but that was almost entirely buy-and-hold drift**: of 37
+  live-eligible-universe backtests, only 3 (8.1%) contained an actual round
+  trip, and those 3 had a 0% win rate -- see "Trade frequency, not just
+  trade quality" below. Not a live or paper candidate on this evidence.
 - **`adaptive_ensemble`** -- regime-aware weighted vote across the three
   above: mostly trend-following signals when `regime()` detects a real trend
   (wide fast/slow SMA gap relative to volatility), mostly RSI mean-reversion
-  when it detects chop. This is the default candidate for live use once it
-  clears the bar in "Judging a backtest" below -- not because it's
-  guaranteed better, but because picking one fixed strategy means betting
-  the whole account on the market staying in the regime that strategy likes.
+  when it detects chop. The live default in `config/risk.yaml`/`trade-cycle`
+  -- not because it's guaranteed better, but because picking one fixed
+  strategy means betting the whole account on the market staying in the
+  regime that strategy likes. **Real weakness found 2026-08-26, after 170
+  live paper cycles produced zero trades beyond the two opened in cycle 1**:
+  it only generates an actual (non-drift) trade on 38.9% of the
+  live-eligible universe over a full 180-day backtest -- the lowest firing
+  rate of any strategy with a clean, non-unrealized-inflated track record.
+  When it DOES trade, its record is genuinely the best of any strategy
+  tested (+29.13% avg, 100% win rate, 0/14 unrealized-inflated) -- this is a
+  frequency problem, not a quality problem. See "Trade frequency, not just
+  trade quality" below.
 - **`adaptive_ensemble_fast`** -- same ensemble logic as `adaptive_ensemble`
   but with roughly half the lookback windows (5/15-bar SMA, 7-bar RSI,
   10-bar breakout), on the hypothesis that the original's windows -- sized
@@ -198,6 +214,51 @@ None of the base strategies is inherently "the" strategy -- they suit
 different market regimes, which is exactly the problem `adaptive_ensemble`
 and `trade-cycle` step 5's conservative-combination rule are trying to
 manage rather than ignore.
+
+### Trade frequency, not just trade quality
+
+All of these strategies read *daily*-scale closes (SMA10/30, RSI14) --
+running `paper_trading/run_paper_cycle.py` every few minutes instead of
+every few hours doesn't create more trading opportunities, it just
+recomputes the same signal against a bar that hasn't changed yet. 170 live
+paper cycles over 12 hours producing zero trades beyond the two opened in
+cycle 1 wasn't a cadence problem; it was `adaptive_ensemble` almost never
+crossing its own fire threshold, confirmed by then actually measuring how
+often each strategy generates a real trade at all, not just what its
+average return looks like when it does.
+
+**A strategy's raw average return (or even win rate) computed across every
+backtested asset is misleading if most of those backtests never actually
+traded** -- a strategy that took zero positions on an asset that happened
+to drift upward over the test window gets credited with that drift as if
+it were a decision, when `test_round_trips == 0` means nothing was ever
+bought or sold. `volatility_breakout` is the clearest example: it looked
+competitive on raw average return, but only 3 of 37 live-eligible-universe
+backtests (8.1%) contained an actual round trip, and every one of those 3
+lost money (0% win rate) -- the "good" number was almost entirely
+buy-and-hold drift on assets it never traded.
+
+The fix: filter to `test_round_trips > 0` first, THEN compare average
+return/win rate, AND check what fraction of even those real-trade results
+still carry a 0%-closed-win-rate-but-positive-return pattern (the
+mark-to-market-only artifact documented under `macd_crossover` above) --
+three numbers together (fire rate, real-trade return, and what fraction of
+that is genuinely realized), not any one of them alone. Re-run this same
+three-part check whenever picking a strategy from a backtest, not just the
+first time:
+
+```
+# fire rate + real-trade return, filtered to test_round_trips > 0
+# then, for the same strategy, check what fraction of those had a
+# 0%-win-rate-but-positive-return row (== unrealized-only, see
+# macd_crossover's writeup above for the exact snippet)
+```
+
+A strategy with a low fire rate isn't necessarily bad (`adaptive_ensemble`
+has the best per-trade record of anything tested here) -- but it does mean
+"run it and wait" can look identical to "it's broken" for a long time, and
+a small/short paper-trading window may simply not contain one of its rarer
+trade opportunities yet.
 
 ### Judging a backtest
 
