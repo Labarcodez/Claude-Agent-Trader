@@ -307,12 +307,46 @@ This is the fee-drag problem `docs/STRATEGY.md`'s "core problem with a
 small account" already names, now measured directly: a strategy's edge per
 trade has to outrun its trading frequency's fee cost, and for these
 strategies on Kraken's real fee schedule, hourly clears that bar while
-15-minute and 5-minute don't. **Use `--interval-minutes 60` with
-`--strategy ema_ribbon` or `donchian_channel_breakout` for real day
-trading** (`paper_trading/run_paper_cycle.py --interval-minutes 60
---strategy ema_ribbon`) -- the infrastructure supports 15/5-minute bars for
-future re-testing (a different asset universe, a different fee tier, or a
-strategy actually designed for that noise floor could change this), but
+15-minute and 5-minute don't.
+
+**A real methodology caveat found while re-verifying this (2026-08-26):**
+re-running `backtest_all.py --interval-minutes 60` minutes apart, on the
+same code, produced wildly different hourly results across attempts made
+during that day's development session -- one run showed the strong numbers
+in the table above, two others (made ~2-4 minutes later) showed every
+strategy *negative* on the same assets. Live OHLC data can't plausibly
+shift that much in minutes, so this was almost certainly a code-in-flux
+artifact of active same-session development, not evidence the underlying
+edge is this unstable -- but it could not be fully root-caused after the
+fact. A clean re-run against the current, fully-tested codebase reproduced
+the strong table above (see `backtest_all_20260826T192717Z.json`), which is
+why hourly mode is still recommended -- but given this, treat any single
+`backtest_all.py` run with real skepticism and re-run before trusting a
+result, even more than "Judging a backtest" below already recommends.
+
+**Frequency vs. quality, from that clean re-verification run** (40 assets,
+same honest methodology -- real trades only, unrealized-inflated excluded):
+
+| Strategy | Total round-trips (40 assets) | Avg return | Win rate |
+|---|---|---|---|
+| `sma_crossover` | 138 | +18.9% | 54.8% |
+| `donchian_channel_breakout` | 97 | +19.8% | 60.8% |
+| `volatility_breakout` | 55 | +22.4% | 80.6% |
+| `ema_ribbon` | 52 | +22.4% | 79.2% |
+
+All four are real, evidence-backed hourly candidates -- the honest
+trade-off is frequency against win rate, not "some are fake." Live paper
+default as of 2026-08-26 is **`donchian_channel_breakout`**, chosen for
+meaningfully more trade frequency than `ema_ribbon` (+87%) while keeping a
+respectable win rate; `sma_crossover` is the more-aggressive-still option if
+even more frequency is wanted at a lower win rate, and `ema_ribbon`/
+`volatility_breakout` are the higher-win-rate, lower-frequency alternative
+if that's ever preferred instead. **Use `--interval-minutes 60` with
+`--strategy donchian_channel_breakout`** for real day trading
+(`paper_trading/run_paper_cycle.py --interval-minutes 60 --strategy
+donchian_channel_breakout`) -- the infrastructure supports 15/5-minute bars
+for future re-testing (a different asset universe, a different fee tier, or
+a strategy actually designed for that noise floor could change this), but
 today's evidence says don't trade on them.
 
 **This paper-tracks separately from the daily-mode default** -- switching

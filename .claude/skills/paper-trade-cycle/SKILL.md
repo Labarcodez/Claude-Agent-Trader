@@ -37,13 +37,15 @@ continue from that state. Use `--reset` to wipe it and start over (e.g.
 after changing strategy or risk parameters, so old paper results don't mix
 with new ones).
 
-**Day trading**: `--interval-minutes 60 --strategy ema_ribbon` (or
-`donchian_channel_breakout`) paper-trades on hourly bars instead of daily --
-see `docs/STRATEGY.md` "Day trading -- what the evidence actually supports"
-for why hourly specifically (15/5-minute bars backtested unprofitable once
-real fee drag from trading that often is counted). Use `--reset` when
-switching so the new mode's track record isn't mixed with the daily
-default's.
+**Day trading**: `--interval-minutes 60 --strategy donchian_channel_breakout`
+(or `ema_ribbon`/`volatility_breakout` for fewer, higher-win-rate trades, or
+`sma_crossover` for even more frequent, lower-win-rate ones) paper-trades on
+hourly bars instead of daily -- see `docs/STRATEGY.md` "Day trading -- what
+the evidence actually supports" for the full frequency-vs-win-rate
+comparison and for why hourly specifically (15/5-minute bars backtested
+unprofitable once real fee drag from trading that often is counted). Use
+`--reset` when switching so the new mode's track record isn't mixed with
+the daily default's.
 
 Read `paper_trading/run_paper_cycle.py`'s module docstring for the specific
 ways it simplifies vs. live trading (no real order validation beyond what
