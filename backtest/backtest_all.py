@@ -18,6 +18,7 @@ Usage:
     python3 backtest/backtest_all.py
     python3 backtest/backtest_all.py --history-days 90 --max-candidates 15
     python3 backtest/backtest_all.py --skip-discovery   # BTC/ETH only, fast
+    python3 backtest/backtest_all.py --interval-minutes 60 --history-days 30   # day-trading timeframe
 """
 from __future__ import annotations
 import argparse
@@ -41,6 +42,7 @@ from research import discover_candidates as disco  # noqa: E402
 from backtest import fetch_history as fh  # noqa: E402
 from backtest.engine import run_walk_forward, assess_overfit  # noqa: E402
 from backtest.strategies import STRATEGIES  # noqa: E402
+from kraken.client import OHLC_DAILY_INTERVAL_MINUTES, OHLC_VALID_INTERVALS_MINUTES  # noqa: E402
 
 RESULTS_DIR = Path(__file__).parent / "results"
 
@@ -114,6 +116,12 @@ def main():
                      help="mirrors config/discovery.yaml's max_candidates_per_cycle -- Kraken's full USD-pair "
                           "universe (a few hundred) is cheap enough to evaluate in full every run, this only "
                           "matters if that count ever exceeds it.")
+    ap.add_argument("--interval-minutes", type=int, default=OHLC_DAILY_INTERVAL_MINUTES,
+                     choices=sorted(OHLC_VALID_INTERVALS_MINUTES),
+                     help="Bar granularity for day-trading-timeframe backtests (60/15/5), default 1440 (daily, "
+                          "the original granularity). --history-days is automatically capped by Kraken's own "
+                          "~720-bar limit at short intervals (e.g. 5-minute bars: ~2.5 days max obtainable "
+                          "regardless of --history-days) -- see kraken.client.ohlc()'s docstring.")
     ap.add_argument("--request-delay", type=float, default=0.4)
     ap.add_argument("--skip-discovery", action="store_true", help="Only backtest BTC + ETH (fast, no discovery pass)")
     # Discovery safety/tier thresholds -- same flags and defaults as
@@ -130,8 +138,8 @@ def main():
     ap.add_argument("--established-volume-usd", type=float, default=10_000_000)
     args = ap.parse_args()
 
-    assets = [{"symbol": c["symbol"], "cache_key": fh.cache_key_for_kraken(c["pair"]), "ref": c["pair"], "tier": "reference"}
-              for c in CORE_REFERENCE_PAIRS]
+    assets = [{"symbol": c["symbol"], "cache_key": fh.cache_key_for_kraken(c["pair"], args.interval_minutes),
+               "ref": c["pair"], "tier": "reference"} for c in CORE_REFERENCE_PAIRS]
 
     if not args.skip_discovery:
         print("Running discovery...")
@@ -148,14 +156,14 @@ def main():
         for c in eligible:
             if c["symbol"] in reference_symbols:
                 continue  # already backtesting this pair as a reference asset above -- don't do it twice
-            assets.append({"symbol": c["symbol"], "cache_key": fh.cache_key_for_kraken(c["pair"]),
+            assets.append({"symbol": c["symbol"], "cache_key": fh.cache_key_for_kraken(c["pair"], args.interval_minutes),
                             "ref": c["pair"], "tier": c.get("tier")})
 
     all_results = []
     for a in assets:
         print(f"Fetching + backtesting {a['symbol']:<10} (pair: {a['ref']})")
         try:
-            payload = fh.fetch_ohlc_kraken(a["ref"], args.history_days)
+            payload = fh.fetch_ohlc_kraken(a["ref"], args.history_days, interval_minutes=args.interval_minutes)
             n_points = len(payload.get("prices", []))
             if n_points < 20:
                 print(f"  ! only {n_points} price points -- too little history to backtest meaningfully, skipping")

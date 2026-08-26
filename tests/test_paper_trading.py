@@ -3,6 +3,7 @@
 Run: python3 -m unittest discover -s tests -v"""
 import argparse
 import json
+import os
 import sys
 import time
 import unittest
@@ -337,6 +338,43 @@ class TestScoutDiscoArgs(unittest.TestCase):
         self.assertEqual(scout.established_mcap_usd, base.established_mcap_usd)
 
 
+class TestRealTakerFeeBpsIfAvailable(unittest.TestCase):
+    """real_taker_fee_bps_if_available() -- the fee-aware edge-cost gate's
+    real-fee-tier lookup, mirroring kraken/propose_order.py's identical
+    pattern: prefer real account data over a flat assumption, but never
+    require an API key to be configured."""
+
+    def setUp(self):
+        self._orig_key = os.environ.pop("KRAKEN_API_KEY", None)
+        self._orig_secret = os.environ.pop("KRAKEN_API_SECRET", None)
+
+    def tearDown(self):
+        if self._orig_key is not None:
+            os.environ["KRAKEN_API_KEY"] = self._orig_key
+        if self._orig_secret is not None:
+            os.environ["KRAKEN_API_SECRET"] = self._orig_secret
+
+    def test_falls_back_to_default_when_no_key_configured(self):
+        self.assertEqual(p.real_taker_fee_bps_if_available(26.0), 26.0)
+
+    @patch("kraken.client.trade_volume")
+    def test_uses_real_tier_when_key_configured(self, mock_trade_volume):
+        os.environ["KRAKEN_API_KEY"] = "k"
+        os.environ["KRAKEN_API_SECRET"] = "c2VjcmV0"
+        mock_trade_volume.return_value = {
+            "error": [], "result": {"volume": "0", "fees": {"XXBTZUSD": {"fee": "0.8000"}}, "fees_maker": {"XXBTZUSD": {"fee": "0.4000"}}},
+        }
+        self.assertAlmostEqual(p.real_taker_fee_bps_if_available(26.0), 80.0)
+
+    @patch("kraken.client.trade_volume")
+    def test_kraken_api_error_falls_back_to_default_not_a_crash(self, mock_trade_volume):
+        os.environ["KRAKEN_API_KEY"] = "k"
+        os.environ["KRAKEN_API_SECRET"] = "c2VjcmV0"
+        from kraken.client import KrakenAPIError
+        mock_trade_volume.side_effect = KrakenAPIError("boom")
+        self.assertEqual(p.real_taker_fee_bps_if_available(26.0), 26.0)
+
+
 class TestSizePosition(unittest.TestCase):
     def test_no_history_uses_minimum_size_only(self):
         # trade-cycle's documented rule: no vol-scaling for a pair with no
@@ -438,6 +476,20 @@ class TestRegimeCache(unittest.TestCase):
         self.assertIsNone(p._load_regime_cache("XBTUSD", 30))
 
 
+class TestPriceHistoryCachePathIsIntervalAware(unittest.TestCase):
+    def test_daily_interval_keeps_the_original_unsuffixed_filename(self):
+        path = p._price_history_cache_path("XBTUSD", 90, interval_minutes=1440)
+        self.assertEqual(path.name, "XBTUSD_90d.json")
+
+    def test_non_daily_interval_gets_a_distinct_suffixed_filename(self):
+        path = p._price_history_cache_path("XBTUSD", 30, interval_minutes=60)
+        self.assertEqual(path.name, "XBTUSD_60m_30d.json")
+
+    def test_different_intervals_of_the_same_pair_never_collide(self):
+        paths = {p._price_history_cache_path("XBTUSD", 30, interval_minutes=m) for m in (5, 15, 60, 1440)}
+        self.assertEqual(len(paths), 4)
+
+
 class TestPriceHistoryCache(unittest.TestCase):
     """get_price_history_closes() caches per (pair, days) for
     PRICE_HISTORY_CACHE_TTL_SECONDS -- with several eligible candidates per
@@ -466,6 +518,20 @@ class TestPriceHistoryCache(unittest.TestCase):
         closes2 = p.get_price_history_closes("XBTUSD", 90)
         self.assertEqual(mock_fetch.call_count, 1)
         self.assertEqual(closes1, closes2)
+
+    @patch("backtest.fetch_history.fetch_ohlc_kraken")
+    def test_passes_through_interval_minutes_for_day_trading_timeframes(self, mock_fetch):
+        mock_fetch.return_value = {"prices": [[i, 100.0 + i] for i in range(20)]}
+        p.get_price_history_closes("XBTUSD", 30, interval_minutes=60)
+        _, kwargs = mock_fetch.call_args
+        self.assertEqual(kwargs["interval_minutes"], 60)
+
+    @patch("backtest.fetch_history.fetch_ohlc_kraken")
+    def test_different_intervals_of_the_same_pair_are_cached_separately(self, mock_fetch):
+        mock_fetch.return_value = {"prices": [[i, 100.0 + i] for i in range(20)]}
+        p.get_price_history_closes("XBTUSD", 30, interval_minutes=60)
+        p.get_price_history_closes("XBTUSD", 30, interval_minutes=15)
+        self.assertEqual(mock_fetch.call_count, 2, "a different interval must not be served from another interval's cache")
 
     @patch("backtest.fetch_history.fetch_ohlc_kraken")
     def test_uses_an_impatient_retry_policy_not_the_backtest_default(self, mock_fetch):

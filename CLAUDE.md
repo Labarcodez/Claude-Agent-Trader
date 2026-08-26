@@ -47,13 +47,24 @@ kept for historical reference only.)
   (`scripts/analyze_journal.py`) for real, evidence-backed patterns, and
   turns a genuine one into a specific, human-reviewed proposed change. This
   is how the system improves over time -- see rule 10.
-- `backtest/` -- a dependency-free Python backtesting engine + strategies.
-  `backtest_all.py` backtests everything currently discovery-eligible (plus
-  BTC/USD, ETH/USD) against every strategy in one pass -- prefer it for a
-  real cross-asset picture over one-off single-pair runs. `engine.py` and
-  `strategies.py` are venue-agnostic (operate on a generic cached price
-  series) and were untouched by the Kraken migration.
-- `paper_trading/run_paper_cycle.py` -- the paper-trading simulator.
+- `backtest/` -- a dependency-free Python backtesting engine + strategies
+  (11, including day-trading-oriented ones like `ema_ribbon` and
+  `donchian_channel_breakout`). `backtest_all.py` backtests everything
+  currently discovery-eligible (plus BTC/USD, ETH/USD) against every
+  strategy in one pass -- prefer it for a real cross-asset picture over
+  one-off single-pair runs. `engine.py` and `strategies.py` are
+  venue-agnostic (operate on a generic cached price series) and were
+  untouched by the Kraken migration. Both `backtest_all.py` and
+  `fetch_history.py` take `--interval-minutes` (60/15/5, daily by default)
+  to backtest shorter, day-trading timeframes instead -- see
+  `docs/STRATEGY.md`'s "Day trading -- what the evidence actually supports"
+  before trusting a short-interval result; not every strategy/interval
+  combination clears the real-fee-drag bar.
+- `paper_trading/run_paper_cycle.py` -- the paper-trading simulator. Also
+  takes `--interval-minutes` for day-trading paper tracks, and gates every
+  candidate entry on `kraken/fees.py`'s `edge_clears_costs()` so a trade
+  only opens when its expected profit clears real round-trip fees by a
+  minimum multiple (`config/risk.yaml`'s `min_edge_to_cost_multiple`).
 - `tests/` -- unit tests (stdlib `unittest`) for the strategy math, engine
   mechanics, Kraken client signing/parsing, and discovery safety/tier logic.
   Run after touching `backtest/strategies.py`, `backtest/engine.py`,

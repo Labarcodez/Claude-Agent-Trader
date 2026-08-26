@@ -60,6 +60,7 @@ Usage:
 from __future__ import annotations
 import argparse
 import json
+import os
 import sys
 import time
 from datetime import datetime, timezone
@@ -228,12 +229,16 @@ def regime_allows_new_entries(reference_pair: str, sma_window_days: int) -> bool
 
 # ---- Signal generation --------------------------------------------------------
 
-def _price_history_cache_path(pair: str, days: int) -> Path:
-    return PRICE_HISTORY_CACHE_DIR / f"{pair}_{days}d.json"
+def _price_history_cache_path(pair: str, days: int, interval_minutes: int = kc.OHLC_DAILY_INTERVAL_MINUTES) -> Path:
+    # Daily (the original, still-default granularity) keeps the original
+    # unsuffixed filename -- same backward-compat convention as
+    # backtest/fetch_history.py's cache_key_for_kraken().
+    suffix = "" if interval_minutes == kc.OHLC_DAILY_INTERVAL_MINUTES else f"_{interval_minutes}m"
+    return PRICE_HISTORY_CACHE_DIR / f"{pair}{suffix}_{days}d.json"
 
 
-def _load_price_history_cache(pair: str, days: int) -> list[float] | None:
-    path = _price_history_cache_path(pair, days)
+def _load_price_history_cache(pair: str, days: int, interval_minutes: int = kc.OHLC_DAILY_INTERVAL_MINUTES) -> list[float] | None:
+    path = _price_history_cache_path(pair, days, interval_minutes)
     if not path.exists():
         return None
     try:
@@ -246,34 +251,41 @@ def _load_price_history_cache(pair: str, days: int) -> list[float] | None:
         return None
 
 
-def _save_price_history_cache(pair: str, days: int, closes: list[float]) -> None:
+def _save_price_history_cache(pair: str, days: int, closes: list[float], interval_minutes: int = kc.OHLC_DAILY_INTERVAL_MINUTES) -> None:
     PRICE_HISTORY_CACHE_DIR.mkdir(parents=True, exist_ok=True)
-    _price_history_cache_path(pair, days).write_text(json.dumps({
+    _price_history_cache_path(pair, days, interval_minutes).write_text(json.dumps({
         "closes": closes,
         "computed_at": datetime.now(timezone.utc).isoformat(),
     }))
 
 
-def get_price_history_closes(pair: str, days: int, cached: list[float] | None = None) -> list[float] | None:
-    """Cached for PRICE_HISTORY_CACHE_TTL_SECONDS per (pair, days). Pass
-    `cached` if the caller already did its own _load_price_history_cache()
-    lookup -- avoids re-reading the same cache file twice. Uses an impatient
-    retry policy (2 attempts, 3s base wait) for the same reason the old
-    pipeline did: this runs inside a tight cron loop where a candidate this
-    gives up on quickly just gets reconsidered next cycle."""
+def get_price_history_closes(pair: str, days: int, cached: list[float] | None = None,
+                              interval_minutes: int = kc.OHLC_DAILY_INTERVAL_MINUTES) -> list[float] | None:
+    """Cached for PRICE_HISTORY_CACHE_TTL_SECONDS per (pair, days,
+    interval_minutes). Pass `cached` if the caller already did its own
+    _load_price_history_cache() lookup -- avoids re-reading the same cache
+    file twice. Uses an impatient retry policy (2 attempts, 3s base wait)
+    for the same reason the old pipeline did: this runs inside a tight cron
+    loop where a candidate this gives up on quickly just gets reconsidered
+    next cycle.
+
+    interval_minutes defaults to daily (unchanged behavior for every
+    existing caller) -- pass e.g. 60 for the validated day-trading
+    timeframe (see docs/STRATEGY.md "Day trading -- what the evidence
+    actually supports")."""
     if cached is None:
-        cached = _load_price_history_cache(pair, days)
+        cached = _load_price_history_cache(pair, days, interval_minutes)
     if cached is not None:
         return cached
     try:
-        payload = fh.fetch_ohlc_kraken(pair, days=days, retries=2, backoff=1.5)
+        payload = fh.fetch_ohlc_kraken(pair, days=days, interval_minutes=interval_minutes, retries=2, backoff=1.5)
     except Exception:
         return None
     prices = payload.get("prices") or []
     if len(prices) < 15:
         return None
     closes = [p for _, p in prices]
-    _save_price_history_cache(pair, days, closes)
+    _save_price_history_cache(pair, days, closes, interval_minutes)
     return closes
 
 
@@ -289,6 +301,25 @@ def compute_signal(closes: list[float], strategy_name: str = "adaptive_ensemble"
 def realized_vol_pct(closes: list[float]) -> float | None:
     vol = strat.realized_vol(closes, window=min(20, max(2, len(closes) - 1)))
     return vol * 100 if vol is not None else None
+
+
+def real_taker_fee_bps_if_available(default_bps: float) -> float:
+    """Tries the account's REAL current Kraken fee tier
+    (kraken.client.trade_volume(), via kraken/fees.py's parse_fee_tier())
+    once per cycle, for the fee-aware edge-cost gate below to check against
+    -- falls back to `default_bps` (the flat --fee-bps assumption) if no
+    API key is configured, or the call fails for any reason. Kraken's fee
+    tier is account-wide (based on 30-day volume), not meaningfully
+    different pair-to-pair for ordinary spot pairs, so one lookup (using
+    BTC/USD as a representative pair) is reused for every candidate this
+    cycle rather than one call per candidate."""
+    if not (os.environ.get("KRAKEN_API_KEY") and os.environ.get("KRAKEN_API_SECRET")):
+        return default_bps
+    try:
+        tier = kf.parse_fee_tier(kc.trade_volume("XBTUSD"), "XBTUSD", default_bps, default_bps)
+        return tier.taker_fee_bps
+    except kc.KrakenAPIError:
+        return default_bps
 
 
 # ---- Sizing & risk --------------------------------------------------------------
@@ -448,6 +479,15 @@ def run_cycle(args):
     print(f"Discovery: {len(candidates)} found, {len(pairs)} evaluated, {len(eligible)} eligible "
           f"({scout_count} scout-tier), {rejected_count} rejected.")
 
+    # One fee-tier lookup for the whole cycle (not per-candidate) -- see
+    # real_taker_fee_bps_if_available()'s docstring for why one call
+    # suffices, and why it gracefully falls back to the flat --fee-bps
+    # assumption rather than requiring a Kraken API key.
+    effective_taker_fee_bps = real_taker_fee_bps_if_available(args.fee_bps)
+    if effective_taker_fee_bps != args.fee_bps:
+        print(f"Using real account fee tier for the edge-cost check: {effective_taker_fee_bps:.0f}bps "
+              f"(assumed default was {args.fee_bps:.0f}bps)")
+
     tracked_pairs = set(eligible) | set(state["positions"])
 
     # gather_candidates() already computed a mid-price for every pair it
@@ -540,7 +580,7 @@ def run_cycle(args):
             # a discovery-time safety gate about whether it's safe to newly
             # BUY a pair, not about its price trend. See the original
             # pipeline's identical reasoning.
-            closes = get_price_history_closes(pair, args.history_days)
+            closes = get_price_history_closes(pair, args.history_days, interval_minutes=args.interval_minutes)
             if closes and compute_signal(closes, args.strategy) == "sell":
                 exit_reason = "strategy sell signal"
         if exit_reason:
@@ -567,7 +607,7 @@ def run_cycle(args):
                 continue
             if price < pos["entry_price_usd"] * (1 + args.scale_in_price_threshold_pct):
                 continue
-            closes = get_price_history_closes(pair, args.history_days)
+            closes = get_price_history_closes(pair, args.history_days, interval_minutes=args.interval_minutes)
             full_target_size = size_position("scout", port_value, closes, args)
             cost_basis = pos.get("cost_basis_usd", 0.0)
             exposure_room = args.max_memecoin_exposure_fraction * port_value - memecoin_exposure_usd(state, prices)
@@ -639,14 +679,14 @@ def run_cycle(args):
             if tier == "scout" and scout_open >= args.max_scout_positions:
                 not_traded[pair] = f"scout-tier cap reached (max_scout_positions={args.max_scout_positions})"
                 continue
-            cached_closes = _load_price_history_cache(pair, args.history_days)
+            cached_closes = _load_price_history_cache(pair, args.history_days, interval_minutes=args.interval_minutes)
             if cached_closes is None and fresh_fetches_this_cycle >= MAX_FRESH_PRICE_HISTORY_FETCHES_PER_CYCLE:
                 not_traded[pair] = (f"deferred to a future cycle (hit MAX_FRESH_PRICE_HISTORY_FETCHES_PER_CYCLE="
                                      f"{MAX_FRESH_PRICE_HISTORY_FETCHES_PER_CYCLE})")
                 continue
             if cached_closes is None:
                 fresh_fetches_this_cycle += 1
-            closes = get_price_history_closes(pair, args.history_days, cached=cached_closes)
+            closes = get_price_history_closes(pair, args.history_days, cached=cached_closes, interval_minutes=args.interval_minutes)
             signal = compute_signal(closes, args.strategy) if closes else None
             if signal != "buy" and closes is not None:
                 not_traded[pair] = f"strategy signal was '{signal}', not buy"
@@ -672,7 +712,7 @@ def run_cycle(args):
             # converted to the equivalent percentage here.
             target_pct = (args.profit_take_multiple - 1) if is_scout else args.take_profit_pct
             edge_check = kf.edge_clears_costs(
-                size_usd, target_pct, entry_fee_bps=args.fee_bps, exit_fee_bps=args.fee_bps,
+                size_usd, target_pct, entry_fee_bps=effective_taker_fee_bps, exit_fee_bps=effective_taker_fee_bps,
                 entry_spread_bps=args.slippage_bps, min_edge_multiple=args.min_edge_to_cost_multiple,
             )
             if not edge_check["clears"]:
@@ -797,6 +837,16 @@ def main():
                      help="mirrors config/discovery.yaml's max_candidates_per_cycle -- set comfortably above "
                           "Kraken's current USD-pair count so this is a safety ceiling, not an active truncation.")
     ap.add_argument("--history-days", type=int, default=90)
+    ap.add_argument("--interval-minutes", type=int, default=kc.OHLC_DAILY_INTERVAL_MINUTES,
+                     choices=sorted(kc.OHLC_VALID_INTERVALS_MINUTES),
+                     help="Bar granularity for signal generation. Default 1440 (daily, the original design). "
+                          "2026-08-26 backtest evidence (docs/STRATEGY.md 'Day trading -- what the evidence "
+                          "actually supports'): 60 (hourly) shows real, clean edge for several strategies -- "
+                          "pair with --strategy ema_ribbon or donchian_channel_breakout. 15 and 5 (minute bars) "
+                          "showed EVERY strategy losing to fee/slippage drag once real trade frequency is "
+                          "accounted for -- the infrastructure supports them but the evidence says don't use "
+                          "them yet. Does not change the regime filter, which stays on daily bars regardless "
+                          "(a market-wide risk gate should track a slower timeframe than what it's gating).")
     ap.add_argument("--strategy", choices=list(strat.STRATEGIES), default="rsi_mean_reversion",
                      help="Which backtest/strategies.py strategy to paper-trade. Was adaptive_ensemble (still the "
                           "live default in config/risk.yaml/trade-cycle -- this flag does NOT change that, only "

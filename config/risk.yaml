@@ -75,6 +75,15 @@ min_24h_volume_usd: 1000000       # never trade a pair with less Kraken 24h volu
                                    # config/discovery.yaml's safety.min_24h_volume_usd; keep the two in sync
 max_spread_bps: 50                # abort if the current bid/ask spread exceeds this -- matches
                                    # config/discovery.yaml's safety.max_spread_bps
+min_edge_to_cost_multiple: 2.0    # a position's expected gross profit at its take-profit target must be at
+                                   # least this many multiples of the real round-trip fee+spread cost
+                                   # (kraken/fees.py's edge_clears_costs(), using the account's REAL current
+                                   # Kraken fee tier, not a flat assumption) -- a trade that only clears its own
+                                   # costs by a hair isn't worth the tail risk of a worse-than-modeled fill
+                                   # eating the rest. Matters more the more often the account trades: added
+                                   # 2026-08-26 alongside day-trading-timeframe support specifically because
+                                   # trading more often multiplies fee drag, and a small account can't just
+                                   # absorb that the way a larger one can.
 
 # ---- Stop loss / take profit (per position) ----------------------------------
 stop_loss_pct: 0.15              # exit a position down 15% from entry

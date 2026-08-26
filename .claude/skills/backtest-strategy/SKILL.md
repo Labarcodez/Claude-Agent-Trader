@@ -25,6 +25,16 @@ strategy doing across the current universe," not just "how does it do on
 this one pair" -- it's also the right tool for periodically re-checking
 `adaptive_ensemble`'s health, per "Judging a backtest" below.
 
+**Day-trading timeframes**: add `--interval-minutes 60` (or 15/5) to
+backtest on hourly/15-minute/5-minute bars instead of daily -- `--history-days`
+is automatically capped by Kraken's own ~720-bar limit at short intervals
+(hourly: ~30 days max; 15-minute: ~7.5 days; 5-minute: ~2.5 days). Always
+apply the trade-frequency check from `docs/STRATEGY.md` "Trade frequency,
+not just trade quality" before trusting a result at any granularity, and
+see that doc's "Day trading -- what the evidence actually supports" for
+which combinations already cleared that bar (hourly did; 15/5-minute
+didn't, once real fee drag from trading that often was counted).
+
 Read `docs/STRATEGY.md` "Autonomous discovery" for a real example of what
 this surfaces: emerging-tier pairs routinely show *both* far larger returns
 and far larger drawdowns than BTC/ETH in the same run -- live evidence for

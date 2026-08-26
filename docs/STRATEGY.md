@@ -210,6 +210,29 @@ universe changes.
   live candidate on this evidence, kept as a documented negative result
   rather than re-derived from scratch later.
 
+- **`stochastic_oscillator`** -- the "slow stochastic" %D line (where the
+  latest close sits within its trailing range, smoothed) crossing
+  oversold/overbought thresholds. Distinct from RSI: measures *position
+  within the recent range*, not the size/speed of recent gains vs. losses --
+  the two can disagree. **Backtested 2026-08-26 on hourly bars: fires on
+  100% of assets but with a clean, real -2.3% average return** (0/41
+  unrealized-inflated) -- genuinely tested and unprofitable at this
+  granularity, not just untested. Worse at 15/5-minute (see "Day trading"
+  below).
+- **`donchian_channel_breakout`** -- classic "turtle trading" breakout: buy
+  on any new N-bar high, sell on any new N-bar low, no confirmation buffer
+  beyond the extreme itself. Distinct from `volatility_breakout`, which
+  requires clearing the extreme by a volatility-scaled margin first (fewer,
+  better-confirmed trades). **Backtested 2026-08-26: one of the strongest
+  real performers on hourly bars** (+21.0% avg, 97.5% fire rate, 0/39
+  unrealized-inflated) -- see "Day trading" below.
+- **`ema_ribbon`** -- three-EMA (fast/mid/slow) alignment; fires only on the
+  bar where all three newly align bullishly or bearishly, not on every bar
+  the alignment holds. Smoother/more selective than `sma_crossover`'s single
+  fast/slow cross. **Backtested 2026-08-26: the single best real performer
+  found on hourly bars** (+24.2% avg, 82.1% fire rate, 0/32
+  unrealized-inflated) -- see "Day trading" below.
+
 None of the base strategies is inherently "the" strategy -- they suit
 different market regimes, which is exactly the problem `adaptive_ensemble`
 and `trade-cycle` step 5's conservative-combination rule are trying to
@@ -259,6 +282,54 @@ has the best per-trade record of anything tested here) -- but it does mean
 "run it and wait" can look identical to "it's broken" for a long time, and
 a small/short paper-trading window may simply not contain one of its rarer
 trade opportunities yet.
+
+### Day trading -- what the evidence actually supports
+
+`kraken.client.ohlc()` (and `backtest/fetch_history.py`,
+`backtest/backtest_all.py`, `paper_trading/run_paper_cycle.py`) support
+`interval_minutes` (5/15/30/60/240, default 1440/daily) so any strategy can
+be backtested and paper-traded at day-trading granularity, not just daily.
+Kraken's OHLC endpoint caps at ~720 bars regardless of interval, which
+bounds how much history a short interval can even provide (5-minute bars:
+~2.5 days max; 15-minute: ~7.5 days; hourly: ~30 days) -- a real ceiling,
+not a "not enough history" edge case.
+
+**Actually tested (2026-08-26), applying the same trade-frequency-adjusted
+methodology above at each granularity:**
+
+| Interval | Verdict | Real evidence |
+|---|---|---|
+| **60 min (hourly)** | **Genuinely promising** | `ema_ribbon` (+24.2%, 82% fire rate, 0/32 unrealized-inflated), `donchian_channel_breakout` (+21.0%, 97.5% fire rate, 0/39 inflated), `volatility_breakout` (+23.8%, 92.5% fire rate -- a complete reversal from its poor *daily*-bar showing), `sma_crossover` (+18.4%, 100% fire rate) all show clean, real, high-frequency edge. |
+| 15 min | **Not profitable** | EVERY strategy tested showed a *negative* average return once real trade frequency was counted, including ones with a nominal 100% win rate (`macd_crossover`: 100% win rate, **-12.9%** average return) -- fee/slippage drag from trading that often overwhelms each individual trade's edge. |
+| 5 min | **Not profitable, worse** | Same pattern, more pronounced. The one nominally-positive result fired on only 25.6% of assets over a 2-day window -- too small a sample to trust. |
+
+This is the fee-drag problem `docs/STRATEGY.md`'s "core problem with a
+small account" already names, now measured directly: a strategy's edge per
+trade has to outrun its trading frequency's fee cost, and for these
+strategies on Kraken's real fee schedule, hourly clears that bar while
+15-minute and 5-minute don't. **Use `--interval-minutes 60` with
+`--strategy ema_ribbon` or `donchian_channel_breakout` for real day
+trading** (`paper_trading/run_paper_cycle.py --interval-minutes 60
+--strategy ema_ribbon`) -- the infrastructure supports 15/5-minute bars for
+future re-testing (a different asset universe, a different fee tier, or a
+strategy actually designed for that noise floor could change this), but
+today's evidence says don't trade on them.
+
+**This paper-tracks separately from the daily-mode default** -- switching
+`--interval-minutes`/`--strategy` mid-run mixes decisions made under
+different signal engines into the same `state/paper_portfolio.json`
+history. Run `--reset` when starting a day-trading paper track record you
+want to judge cleanly against the daily-mode one.
+
+**Also wired in alongside this**: every new position now has to clear
+`kraken.fees.edge_clears_costs()` before it's opened --
+`config/risk.yaml`'s `min_edge_to_cost_multiple` (default 2.0x) -- checked
+against the account's REAL current Kraken fee tier
+(`kraken.client.trade_volume()`) when an API key is configured, not a flat
+assumption. This matters more the more often the account trades, which is
+exactly what day trading means -- a signal that can't clear its own real
+costs by a healthy margin is rejected before it ever becomes a trade,
+logged in `not_traded` the same as any other rejection reason.
 
 ### Judging a backtest
 
