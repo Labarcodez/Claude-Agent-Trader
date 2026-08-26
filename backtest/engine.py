@@ -1,9 +1,10 @@
 """Minimal single-asset backtesting engine, stdlib only.
 
-Simulates trading a strategy against a cached CoinGecko price series, applying
-a fee/slippage cost per trade and simple position sizing (all-in / all-out on
+Simulates trading a strategy against a cached price series (Kraken OHLC or
+CoinGecko market_chart, see backtest/fetch_history.py), applying a
+fee/slippage cost per trade and simple position sizing (all-in / all-out on
 buy/sell signals -- good enough for evaluating a signal's edge before it's
-allowed to touch the live $50 account; the live agent's *actual* position
+allowed to touch the live account; the live agent's *actual* position
 sizing/risk rules live in config/risk.yaml and are enforced separately by the
 trade-cycle skill, not by this engine).
 """
@@ -99,7 +100,8 @@ def load_cached_prices(coin_id: str, days: int) -> list[tuple[int, float]]:
     path = CACHE_DIR / f"{coin_id}_{days}d.json"
     if not path.exists():
         raise FileNotFoundError(
-            f"No cached data at {path}. Run: python3 backtest/fetch_history.py --coin {coin_id} --days {days}"
+            f"No cached data at {path}. Run: python3 backtest/fetch_history.py --pair {coin_id} --days {days}"
+            f" (or --coin {coin_id} --days {days} if this is a CoinGecko coin id, not a Kraken pair altname)"
         )
     payload = json.loads(path.read_text())
     return [(int(ts), float(price)) for ts, price in payload["prices"]]
@@ -156,17 +158,22 @@ def _simulate(series: list[tuple[int, float]], coin_id: str, strategy_fn, fee_bp
     return result
 
 
-def run_backtest(coin_id: str, days: int, strategy_fn, fee_bps: float = 30,
-                  slippage_bps: float = 50, **strategy_kwargs) -> BacktestResult:
-    """fee_bps + slippage_bps model realistic Solana swap costs (~0.3% fee is
-    high vs. Jupiter's actual fee-free routing via Phantom, but conservative is
-    safer than optimistic when deciding whether a strategy has real edge)."""
+def run_backtest(coin_id: str, days: int, strategy_fn, fee_bps: float = 40,
+                  slippage_bps: float = 20, **strategy_kwargs) -> BacktestResult:
+    """fee_bps + slippage_bps model realistic Kraken execution costs: 40bps
+    defaults to Kraken's lowest-tier (Starter) *taker* fee -- conservative,
+    since a live agent that prefers maker (limit) orders per
+    config/risk.yaml's prefer_maker_orders would pay closer to the ~25bps
+    maker rate; 20bps slippage is a stress-test assumption for a liquid CEX
+    order book, tighter than a typical DEX pool's price impact but not zero.
+    Conservative is safer than optimistic when deciding whether a strategy
+    has real edge."""
     series = load_cached_prices(coin_id, days)
     return _simulate(series, coin_id, strategy_fn, fee_bps, slippage_bps, start_index=0, **strategy_kwargs)
 
 
-def run_walk_forward(coin_id: str, days: int, strategy_fn, split: float = 0.7, fee_bps: float = 30,
-                      slippage_bps: float = 50, **strategy_kwargs) -> tuple[BacktestResult, BacktestResult]:
+def run_walk_forward(coin_id: str, days: int, strategy_fn, split: float = 0.7, fee_bps: float = 40,
+                      slippage_bps: float = 20, **strategy_kwargs) -> tuple[BacktestResult, BacktestResult]:
     """Chronological train/test split to catch overfitting: a strategy (or a
     parameter tuned by hand) that only "works" on the exact window you tested
     it on is worthless live. `train` simulates on the first `split` fraction

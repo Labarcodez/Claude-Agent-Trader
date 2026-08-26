@@ -1,24 +1,24 @@
 #!/usr/bin/env python3
-"""Fetch historical daily price/volume history from CoinGecko's free public API
-and cache it locally as JSON, for use by backtest/engine.py.
-
-No API key required (uses the public api.coingecko.com endpoints, which are
-rate-limited but sufficient for periodic backtesting). Stdlib only.
+"""Fetch historical daily price/volume history and cache it locally as JSON,
+for use by backtest/engine.py. Stdlib only, no API key required for either
+source.
 
 Two lookup modes:
-  --coin <coingecko-id>              e.g. solana, jupiter-exchange-solana
-  --contract <mint> [--platform solana]   any Solana token by mint address --
-                                           this works even for tokens with no
-                                           CoinGecko "coin id" of their own
-                                           (verified live against a same-day
-                                           pump.fun launch), which is what
-                                           makes freshly-discovered tokens
-                                           (see research/discover_candidates.py)
-                                           backtestable at all.
+  --pair <kraken-altname>   Kraken's own public OHLC endpoint, e.g. XBTUSD,
+                             ETHUSD, SOLUSD -- the exchange-native source,
+                             and the only way to get history for a pair with
+                             no separate CoinGecko listing. Kraken's public
+                             OHLC endpoint returns at most the most recent
+                             720 daily candles (~2 years); --days above that
+                             is silently capped.
+  --coin <coingecko-id>     CoinGecko's market_chart endpoint, e.g. bitcoin,
+                             ethereum -- useful for a longer history window
+                             than Kraken's 720-candle cap allows, for majors
+                             CoinGecko has deep history on.
 
 Usage:
-    python3 backtest/fetch_history.py --coin solana --days 180
-    python3 backtest/fetch_history.py --contract JUPyiwrYJFskUPiHa7hkeR8VUtAeFoSYbKedZNsDvCN --days 30
+    python3 backtest/fetch_history.py --pair XBTUSD --days 180
+    python3 backtest/fetch_history.py --coin bitcoin --days 365
 """
 from __future__ import annotations
 import argparse
@@ -30,28 +30,26 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 CACHE_DIR = Path(__file__).parent / "cache"
-BASE_URL = "https://api.coingecko.com/api/v3"
+COINGECKO_BASE = "https://api.coingecko.com/api/v3"
+KRAKEN_BASE = "https://api.kraken.com/0/public"
+KRAKEN_MAX_DAILY_CANDLES = 720   # Kraken's public OHLC endpoint's own cap for interval=1440
 
 
 def _resample_to_daily(series: list[list]) -> list[list]:
-    """Collapses a CoinGecko [timestamp_ms, value] series down to one point
-    per UTC calendar day (the last observation of that day = the day's
-    close), regardless of the source granularity.
+    """Collapses a [timestamp_ms, value] series down to one point per UTC
+    calendar day (the last observation of that day = the day's close),
+    regardless of the source granularity.
 
     Why this exists: CoinGecko's free market_chart endpoint auto-selects
     granularity by range -- hourly for any days<=90 request, daily only
-    above 90 (verified live: days=90 returns 2,161 hourly points; days=91
-    returns 92 daily points). Every "daily-scale" indicator in this repo
-    (SMA10/30, RSI14, the regime filter's N-day SMA, volatility_breakout's
-    20-bar lookback) assumes each series entry is one day. Left unresampled,
-    a days<=90 request (backtest_all.py's default, paper trading's signal
-    history, and the regime filter's SMA window all request <=90) silently
-    turns a "30-day SMA" into a ~30-*hour* SMA -- wrong by roughly 24x,
-    without erroring or looking obviously broken. Resampling once here, at
-    the source, means every consumer (engine, paper trading, regime filter)
-    gets true daily bars no matter what granularity the API happened to
-    return, instead of each caller needing to know and guard against
-    CoinGecko's range-dependent behavior itself."""
+    above 90. Every "daily-scale" indicator in this repo (SMA10/30, RSI14,
+    the regime filter's N-day SMA, volatility_breakout's 20-bar lookback)
+    assumes each series entry is one day. Left unresampled, a days<=90
+    request silently turns a "30-day SMA" into a ~30-*hour* SMA -- wrong by
+    roughly 24x, without erroring or looking obviously broken. Kraken's OHLC
+    endpoint is requested at interval=1440 (already daily) so this is a
+    no-op there in practice, but it's kept as the single resampling point
+    both sources funnel through, so neither can silently regress this."""
     if not series:
         return series
     by_day: dict[str, list] = {}
@@ -84,26 +82,35 @@ def fetch_market_chart(coin_id: str, days: int, vs_currency: str = "usd") -> dic
     each a list of [unix_ms, value] pairs, looked up by CoinGecko coin id.
     Resampled to one point per UTC day regardless of what granularity the API
     returned -- see _resample_to_daily()."""
-    payload = _fetch(f"{BASE_URL}/coins/{coin_id}/market_chart?vs_currency={vs_currency}&days={days}")
+    payload = _fetch(f"{COINGECKO_BASE}/coins/{coin_id}/market_chart?vs_currency={vs_currency}&days={days}")
     return {k: (_resample_to_daily(v) if k in ("prices", "market_caps", "total_volumes") else v)
             for k, v in payload.items()}
 
 
-def fetch_market_chart_by_contract(contract: str, days: int, platform: str = "solana",
-                                    vs_currency: str = "usd") -> dict:
-    """Same payload shape as fetch_market_chart, looked up by token contract/mint
-    address instead of a CoinGecko coin id. Works for tokens that were never
-    given a curated CoinGecko listing (confirmed live against a same-day
-    pump.fun launch) -- this is what makes freshly-discovered tokens
-    backtestable without waiting for CoinGecko to index them by name.
-    Resampled to one point per UTC day -- see _resample_to_daily()."""
-    payload = _fetch(f"{BASE_URL}/coins/{platform}/contract/{contract}/market_chart?vs_currency={vs_currency}&days={days}")
-    return {k: (_resample_to_daily(v) if k in ("prices", "market_caps", "total_volumes") else v)
-            for k, v in payload.items()}
+def fetch_market_chart_by_pair(altname: str, days: int) -> dict:
+    """Same payload shape as fetch_market_chart ({prices, total_volumes}, no
+    market_caps -- Kraken's OHLC doesn't report market cap), sourced from
+    Kraken's own public OHLC endpoint at daily (1440-minute) granularity.
+    Capped at Kraken's own most-recent-720-candle limit for this interval."""
+    days = min(days, KRAKEN_MAX_DAILY_CANDLES)
+    payload = _fetch(f"{KRAKEN_BASE}/OHLC?pair={altname}&interval=1440")
+    if payload.get("error"):
+        raise RuntimeError(f"Kraken OHLC error for {altname}: {payload['error']}")
+    result = payload.get("result") or {}
+    candles = next((v for k, v in result.items() if k != "last"), None)
+    if not candles:
+        raise RuntimeError(f"Kraken OHLC returned no candles for {altname}")
+    candles = candles[-days:]
+    prices = [[int(c[0]) * 1000, float(c[4])] for c in candles]              # [ms, close]
+    total_volumes = [[int(c[0]) * 1000, float(c[6]) * float(c[4])] for c in candles]  # [ms, base_volume * close] as a rough USD-notional proxy
+    return {
+        "prices": _resample_to_daily(prices),
+        "total_volumes": _resample_to_daily(total_volumes),
+    }
 
 
-def cache_key_for(coin: str | None, contract: str | None, platform: str) -> str:
-    return coin if coin else f"contract_{platform}_{contract}"
+def cache_key_for(coin: str | None, pair: str | None) -> str:
+    return coin if coin else f"kraken_{pair}"
 
 
 def save_cache(cache_key: str, days: int, payload: dict) -> Path:
@@ -116,19 +123,17 @@ def save_cache(cache_key: str, days: int, payload: dict) -> Path:
 def main():
     ap = argparse.ArgumentParser()
     group = ap.add_mutually_exclusive_group(required=True)
-    group.add_argument("--coin", help="CoinGecko coin id, e.g. solana, jupiter-exchange-solana")
-    group.add_argument("--contract", help="Token contract/mint address (looked up on --platform)")
-    ap.add_argument("--platform", default="solana", help="CoinGecko platform id for --contract lookups")
-    ap.add_argument("--days", type=int, default=180, help="Number of days of history (max ~365 on free tier)")
-    ap.add_argument("--vs", default="usd")
+    group.add_argument("--pair", help="Kraken pair altname, e.g. XBTUSD, ETHUSD, SOLUSD")
+    group.add_argument("--coin", help="CoinGecko coin id, e.g. bitcoin, ethereum")
+    ap.add_argument("--days", type=int, default=180, help="Number of days of history (Kraken --pair capped at 720; CoinGecko --coin max ~365 on free tier)")
     args = ap.parse_args()
 
-    cache_key = cache_key_for(args.coin, args.contract, args.platform)
-    print(f"Fetching {args.days}d of {cache_key}/{args.vs} history from CoinGecko...")
-    if args.contract:
-        payload = fetch_market_chart_by_contract(args.contract, args.days, args.platform, args.vs)
+    cache_key = cache_key_for(args.coin, args.pair)
+    print(f"Fetching {args.days}d of {cache_key} history from {'Kraken' if args.pair else 'CoinGecko'}...")
+    if args.pair:
+        payload = fetch_market_chart_by_pair(args.pair, args.days)
     else:
-        payload = fetch_market_chart(args.coin, args.days, args.vs)
+        payload = fetch_market_chart(args.coin, args.days)
     out_path = save_cache(cache_key, args.days, payload)
     n = len(payload.get("prices", []))
     print(f"Saved {n} price points to {out_path}")

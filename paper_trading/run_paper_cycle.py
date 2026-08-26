@@ -1,35 +1,47 @@
 #!/usr/bin/env python3
 """Paper-trading simulator: runs the SAME discovery + strategy + risk logic
-the live `trade-cycle` skill uses, against real live market data, but never
-touches a real wallet. Fills are simulated at current market price with the
-same fee/slippage assumptions as backtest/engine.py. State lives in
+the live `trade-cycle` skill uses, against real live Kraken market data, but
+never touches a real account. Fills are simulated at current market price
+with the same fee/slippage assumptions as backtest/engine.py. State lives in
 state/paper_portfolio.json; every cycle appends to journal/paper_trades.jsonl
 -- kept completely separate from journal/trades.jsonl (real trading history).
 
 Why this exists: it validates the full autonomous pipeline end-to-end --
-including on tokens research/discover_candidates.py finds fresh, which have
-no track record of their own -- before any real money is at risk. It's
-runnable from a session with no Phantom MCP connection at all, since it only
-reads public market data (Jupiter, CoinGecko, RugCheck). Run it repeatedly
-(e.g. via /loop) to build a track record while deciding whether to trust the
-system live; see docs/RUNBOOK.md "Paper trading before going live".
+including on pairs research/discover_candidates.py finds fresh, which have
+no track record built up in this repo yet -- before any real money is at
+risk. It only reads Kraken's public market-data endpoints (no API key), so
+it's runnable from any session, including one where a live Kraken MCP
+connection isn't set up at all. Run it repeatedly (e.g. via /loop) to build
+a track record while deciding whether to trust the system live; see
+docs/RUNBOOK.md "Paper trading before going live".
+
+Note: Kraken CLI (kraken-cli) also ships its OWN built-in paper trading
+engine (`kraken workspace create ... --mode paper`, `kraken paper buy/sell`)
+that simulates real order mechanics (partial fills, order types, leverage on
+the futures side). That's a complementary, lower-level validation layer for
+order execution itself; this script is the higher-level pipeline validator
+for the discovery -> regime -> strategy -> sizing -> risk chain the
+adaptive_ensemble strategy actually runs on. Using both before going live is
+reasonable, not redundant.
 
 Simplifications vs. the live trade-cycle skill (documented, not hidden):
-  - No real swap quote, so no live slippage/price-impact check -- a fixed
-    fee_bps + slippage_bps cost is assumed instead (same convention as
-    backtest/engine.py).
+  - No real order-book depth check, so no live slippage/spread check at
+    order time -- a fixed fee_bps + slippage_bps cost is assumed instead
+    (same convention as backtest/engine.py).
   - No max_daily_trade_count / max_daily_volume_usd / min_hours_between_trades
     cadence caps -- this script is typically run manually or via /loop at a
     deliberate interval, so cadence is controlled by how often you run it.
+  - No Kraken Earn / idle-cash yield simulation -- cash sits at 0% here,
+    unlike the live skill's optional Earn allocation (config/risk.yaml).
   - Core position sizing, tiering, volatility scaling, portfolio heat,
     regime filter, and stop-loss/take-profit/trailing-stop ARE all real,
-    reusing the exact same code (backtest/strategies.py, research/discover_candidates.py)
-    the live skill is documented to use.
+    reusing the exact same code (backtest/strategies.py,
+    research/discover_candidates.py) the live skill is documented to use.
 
 Usage:
     python3 paper_trading/run_paper_cycle.py
     python3 paper_trading/run_paper_cycle.py --reset       # wipe paper state, restart at starting capital
-    python3 paper_trading/run_paper_cycle.py --max-candidates 10
+    python3 paper_trading/run_paper_cycle.py --max-candidates 20
 """
 from __future__ import annotations
 import argparse
@@ -61,7 +73,7 @@ def load_state(starting_capital_usd: float, reset: bool) -> dict:
         "created_at": datetime.now(timezone.utc).isoformat(),
         "starting_capital_usd": starting_capital_usd,
         "cash_usd": starting_capital_usd,
-        "positions": {},   # mint -> {symbol, quantity, entry_price_usd, entry_time, tier, peak_price_usd}
+        "positions": {},   # altname -> {symbol, quantity, entry_price_usd, entry_time, tier, peak_price_usd}
         "closed_trades": [],
         "peak_portfolio_value_usd": starting_capital_usd,
         "circuit_breaker": {"tripped": False, "reason": None, "tripped_at": None},
@@ -84,20 +96,24 @@ def append_journal(entry: dict) -> None:
 
 # ---- Pricing ------------------------------------------------------------------
 
-def current_price(mint: str) -> float | None:
-    """Live USD price for any mint, via Jupiter's search endpoint -- works for
-    core assets, discovered candidates, and existing positions uniformly."""
-    results = disco._get_json(f"{disco.JUPITER_BASE}/search?query={mint}")
-    for r in results or []:
-        if r.get("id") == mint:
-            return r.get("usdPrice")
-    return None
+def current_price(altname: str) -> float | None:
+    """Live USD(-ish) price for a Kraken pair altname, via the public Ticker
+    endpoint -- works uniformly for core reference pairs, discovered
+    candidates, and existing positions."""
+    result = disco._get_json(f"{disco.KRAKEN_BASE}/Ticker?pair={altname}")
+    if not result:
+        return None
+    ticker = next(iter(result.values()), None)
+    try:
+        return float(ticker["c"][0]) if ticker else None
+    except (KeyError, IndexError, ValueError, TypeError):
+        return None
 
 
 def portfolio_value_usd(state: dict, prices: dict[str, float]) -> float:
     total = state["cash_usd"]
-    for mint, pos in state["positions"].items():
-        price = prices.get(mint)
+    for altname, pos in state["positions"].items():
+        price = prices.get(altname)
         if price is not None:
             total += pos["quantity"] * price
     return total
@@ -105,9 +121,9 @@ def portfolio_value_usd(state: dict, prices: dict[str, float]) -> float:
 
 # ---- Regime filter ------------------------------------------------------------
 
-def regime_allows_new_entries(reference_coin: str, sma_window_days: int) -> bool:
+def regime_allows_new_entries(reference_pair: str, sma_window_days: int) -> bool:
     try:
-        payload = fh.fetch_market_chart(reference_coin, days=sma_window_days + 5)
+        payload = fh.fetch_market_chart_by_pair(reference_pair, days=sma_window_days + 5)
     except Exception as e:
         print(f"  ! regime filter data unavailable ({e}) -- defaulting to conservative (no new entries)", file=sys.stderr)
         return False
@@ -120,9 +136,9 @@ def regime_allows_new_entries(reference_coin: str, sma_window_days: int) -> bool
 
 # ---- Signal generation --------------------------------------------------------
 
-def get_price_history_closes(mint: str, days: int) -> list[float] | None:
+def get_price_history_closes(altname: str, days: int) -> list[float] | None:
     try:
-        payload = fh.fetch_market_chart_by_contract(mint, days=days)
+        payload = fh.fetch_market_chart_by_pair(altname, days=days)
     except Exception:
         return None
     prices = payload.get("prices") or []
@@ -162,8 +178,8 @@ def portfolio_heat_pct(state: dict, prices: dict[str, float], stop_loss_pct: flo
     if value <= 0:
         return 0.0
     heat_usd = 0.0
-    for mint, pos in state["positions"].items():
-        price = prices.get(mint)
+    for altname, pos in state["positions"].items():
+        price = prices.get(altname)
         if price is not None:
             heat_usd += pos["quantity"] * price * stop_loss_pct
     return heat_usd / value
@@ -185,31 +201,26 @@ def run_cycle(args):
 
     # ---- discovery ----
     print("\nRunning discovery...")
-    candidates = disco.gather_candidates(argparse.Namespace(
-        no_organic=False, no_trending=False, no_recent=False, limit_per_source=args.limit_per_source,
-    ))
-    mints = list(candidates.keys())[: args.max_candidates]
+    candidates = disco.gather_candidates(argparse.Namespace(max_candidates=args.max_candidates))
     eligible: dict[str, dict] = {}
     rejected_count = 0
-    for mint in mints:
-        result = disco.evaluate_candidate(mint, candidates[mint], disco_args(args))
+    for altname in candidates:
+        result = disco.evaluate_candidate(altname, candidates[altname], disco_args(args))
         if result["eligible"]:
-            eligible[mint] = result
+            eligible[altname] = result
         else:
             rejected_count += 1
-    print(f"Discovery: {len(candidates)} found, {len(mints)} evaluated, {len(eligible)} eligible, {rejected_count} rejected.")
+    print(f"Discovery: {len(candidates)} evaluated, {len(eligible)} eligible, {rejected_count} rejected.")
 
     # include existing paper positions even if they fell out of discovery this cycle
-    tracked_mints = set(eligible) | set(state["positions"])
-    for mint in disco.CORE_ASSET_MINTS:
-        tracked_mints.discard(mint)
+    tracked = set(eligible) | set(state["positions"])
 
     prices: dict[str, float] = {}
-    for mint in tracked_mints | disco.CORE_ASSET_MINTS:
+    for altname in tracked:
         time.sleep(args.request_delay)
-        price = current_price(mint)
+        price = current_price(altname)
         if price is not None:
-            prices[mint] = price
+            prices[altname] = price
 
     port_value = portfolio_value_usd(state, prices)
     if port_value > state["peak_portfolio_value_usd"]:
@@ -226,15 +237,15 @@ def run_cycle(args):
         return
 
     # ---- regime filter ----
-    allow_new_entries = regime_allows_new_entries(args.regime_reference_coin, args.regime_sma_window_days)
-    print(f"\nRegime filter (vs {args.regime_reference_coin} {args.regime_sma_window_days}d SMA): "
+    allow_new_entries = regime_allows_new_entries(args.regime_reference_pair, args.regime_sma_window_days)
+    print(f"\nRegime filter (vs {args.regime_reference_pair} {args.regime_sma_window_days}d SMA): "
           f"{'risk-ON (new entries allowed)' if allow_new_entries else 'risk-OFF (new entries blocked)'}")
 
     actions = []
 
     # ---- manage existing positions first (exits are never regime-gated) ----
-    for mint, pos in list(state["positions"].items()):
-        price = prices.get(mint)
+    for altname, pos in list(state["positions"].items()):
+        price = prices.get(altname)
         if price is None:
             continue
         pos["peak_price_usd"] = max(pos.get("peak_price_usd", pos["entry_price_usd"]), price)
@@ -247,41 +258,41 @@ def run_cycle(args):
             exit_reason = f"take-profit ({ret:+.1%})"
         elif ret > 0 and drawdown_from_peak <= -args.trailing_stop_pct:
             exit_reason = f"trailing-stop ({drawdown_from_peak:+.1%} from peak)"
-        if exit_reason is None and mint in eligible:
-            closes = get_price_history_closes(mint, args.history_days)
+        if exit_reason is None and altname in eligible:
+            closes = get_price_history_closes(altname, args.history_days)
             if closes and compute_signal(closes) == "sell":
                 exit_reason = "strategy sell signal"
         if exit_reason:
             proceeds = pos["quantity"] * price * (1 - args.fee_bps / 10_000 - args.slippage_bps / 10_000)
             state["cash_usd"] += proceeds
             state["closed_trades"].append({
-                "symbol": pos["symbol"], "mint": mint, "entry_price_usd": pos["entry_price_usd"],
+                "symbol": pos["symbol"], "altname": altname, "entry_price_usd": pos["entry_price_usd"],
                 "exit_price_usd": price, "return_pct": ret * 100, "reason": exit_reason,
                 "closed_at": cycle_start.isoformat(),
             })
-            actions.append({"type": "sell", "symbol": pos["symbol"], "mint": mint, "reason": exit_reason, "return_pct": ret * 100})
-            del state["positions"][mint]
+            actions.append({"type": "sell", "symbol": pos["symbol"], "altname": altname, "reason": exit_reason, "return_pct": ret * 100})
+            del state["positions"][altname]
 
     # ---- consider new entries ----
     if allow_new_entries:
         open_slots = args.max_concurrent_positions - len(state["positions"])
         emerging_open = sum(1 for p in state["positions"].values() if p.get("tier") == "emerging")
-        for mint, result in eligible.items():
+        for altname, result in eligible.items():
             if open_slots <= 0:
                 break
-            if mint in state["positions"]:
+            if altname in state["positions"]:
                 continue
-            price = prices.get(mint)
+            price = prices.get(altname)
             if price is None:
                 continue
             tier = result["tier"]
             if tier == "emerging" and emerging_open >= args.max_emerging_tier_positions:
                 continue
-            closes = get_price_history_closes(mint, args.history_days)
+            closes = get_price_history_closes(altname, args.history_days)
             time.sleep(args.request_delay)
             signal = compute_signal(closes) if closes else None
             if signal != "buy" and closes is not None:
-                continue  # only trade no-history tokens opportunistically-small; require an actual buy signal when history exists
+                continue  # only trade no-history pairs opportunistically-small; require an actual buy signal when history exists
             size_usd = size_position(tier, port_value, closes, args)
             if size_usd < args.min_trade_usd or size_usd > state["cash_usd"]:
                 continue
@@ -291,11 +302,11 @@ def run_cycle(args):
             fill_price = price * (1 + args.slippage_bps / 10_000)
             quantity = (size_usd * (1 - args.fee_bps / 10_000)) / fill_price
             state["cash_usd"] -= size_usd
-            state["positions"][mint] = {
-                "symbol": result["symbol"], "quantity": quantity, "entry_price_usd": fill_price,
+            state["positions"][altname] = {
+                "symbol": result.get("base", altname), "quantity": quantity, "entry_price_usd": fill_price,
                 "entry_time": cycle_start.isoformat(), "tier": tier, "peak_price_usd": fill_price,
             }
-            actions.append({"type": "buy", "symbol": result["symbol"], "mint": mint, "tier": tier,
+            actions.append({"type": "buy", "symbol": result.get("base", altname), "altname": altname, "tier": tier,
                              "size_usd": size_usd, "fill_price": fill_price,
                              "signal_basis": "buy signal" if closes else "no-history minimum-size entry"})
             open_slots -= 1
@@ -303,9 +314,9 @@ def run_cycle(args):
                 emerging_open += 1
 
     final_prices = dict(prices)
-    for mint in state["positions"]:
-        if mint not in final_prices:
-            final_prices[mint] = current_price(mint) or prices.get(mint, 0)
+    for altname in state["positions"]:
+        if altname not in final_prices:
+            final_prices[altname] = current_price(altname) or prices.get(altname, 0)
     final_value = portfolio_value_usd(state, final_prices)
     state["cycles_run"] += 1
     save_state(state)
@@ -316,7 +327,7 @@ def run_cycle(args):
         "portfolio_value_usd_before": port_value,
         "portfolio_value_usd_after": final_value,
         "regime_allows_new_entries": allow_new_entries,
-        "discovery": {"found": len(candidates), "evaluated": len(mints), "eligible": len(eligible), "rejected": rejected_count},
+        "discovery": {"evaluated": len(candidates), "eligible": len(eligible), "rejected": rejected_count},
         "actions": actions,
         "open_positions": len(state["positions"]),
     })
@@ -337,40 +348,29 @@ def run_cycle(args):
 def disco_args(args) -> argparse.Namespace:
     """Adapts this script's CLI args into the shape research.discover_candidates.evaluate_candidate expects."""
     return argparse.Namespace(
-        request_delay=args.request_delay,
-        min_liquidity_usd=args.min_liquidity_usd,
-        min_holder_count=args.min_holder_count,
-        min_organic_score=args.min_organic_score,
-        min_pool_age_hours=args.min_pool_age_hours,
-        max_top_holder_pct=args.max_top_holder_pct,
-        require_mint_renounced=True,
-        require_freeze_renounced=True,
-        always_rugcheck=False,
-        cross_check_dexscreener=False,  # keep paper cycles fast/light on free APIs by default
-        blue_chip_mcap_usd=args.blue_chip_mcap_usd,
-        blue_chip_holder_count=args.blue_chip_holder_count,
-        established_mcap_usd=args.established_mcap_usd,
-        established_holder_count=args.established_holder_count,
+        min_24h_quote_volume_usd=args.min_24h_quote_volume_usd,
+        max_spread_bps=args.max_spread_bps,
+        min_price_usd=0.000001,
+        blue_chip_min_volume_usd=args.blue_chip_min_volume_usd,
+        blue_chip_max_spread_bps=args.blue_chip_max_spread_bps,
+        established_min_volume_usd=args.established_min_volume_usd,
+        established_max_spread_bps=args.established_max_spread_bps,
     )
 
 
 def main():
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--reset", action="store_true", help="Wipe paper state and restart at --starting-capital-usd")
-    ap.add_argument("--starting-capital-usd", type=float, default=50.0)
+    ap.add_argument("--starting-capital-usd", type=float, default=500.0)
     ap.add_argument("--max-candidates", type=int, default=40)
-    ap.add_argument("--limit-per-source", type=int, default=15)
     ap.add_argument("--request-delay", type=float, default=0.4)
     ap.add_argument("--history-days", type=int, default=90,
-                     help="Was 30 -- raised after fixing backtest/fetch_history.py's daily-resampling bug. With "
-                          "genuinely daily bars (previously days<=30 silently returned hourly data from "
-                          "CoinGecko), 30 days barely lets sma_crossover's slow=30 SMA compute once, let alone "
-                          "show a real crossover -- adaptive_ensemble's trend-following legs would almost never "
-                          "fire. 90 days gives them room to actually signal.")
+                     help="90 days gives sma_crossover's slow=30 SMA and adaptive_ensemble's trend-following legs "
+                          "room to actually signal, without running into Kraken's 720-daily-candle OHLC cap.")
     # mirrors config/risk.yaml -- keep in sync by hand, same convention as research/discover_candidates.py
     ap.add_argument("--max-position-fraction", dest="max_position_fraction", type=float, default=0.30)
-    ap.add_argument("--max-position-usd", dest="max_position_usd", type=float, default=20.0)
-    ap.add_argument("--min-trade-usd", dest="min_trade_usd", type=float, default=5.0)
+    ap.add_argument("--max-position-usd", dest="max_position_usd", type=float, default=200.0)
+    ap.add_argument("--min-trade-usd", dest="min_trade_usd", type=float, default=10.0)
     ap.add_argument("--max-concurrent-positions", dest="max_concurrent_positions", type=int, default=3)
     ap.add_argument("--max-emerging-tier-positions", dest="max_emerging_tier_positions", type=int, default=2)
     ap.add_argument("--target-daily-volatility-pct", dest="target_daily_volatility_pct", type=float, default=3.0)
@@ -380,22 +380,19 @@ def main():
     ap.add_argument("--stop-loss-pct", dest="stop_loss_pct", type=float, default=0.15)
     ap.add_argument("--take-profit-pct", dest="take_profit_pct", type=float, default=0.35)
     ap.add_argument("--trailing-stop-pct", dest="trailing_stop_pct", type=float, default=0.12)
-    ap.add_argument("--circuit-breaker-floor-usd", dest="circuit_breaker_floor_usd", type=float, default=20.0)
+    ap.add_argument("--circuit-breaker-floor-usd", dest="circuit_breaker_floor_usd", type=float, default=200.0)
     ap.add_argument("--circuit-breaker-daily-loss-pct", dest="circuit_breaker_daily_loss_pct", type=float, default=0.25)
-    ap.add_argument("--regime-reference-coin", dest="regime_reference_coin", default="bitcoin")
+    ap.add_argument("--regime-reference-pair", dest="regime_reference_pair", default="XBTUSD")
     ap.add_argument("--regime-sma-window-days", dest="regime_sma_window_days", type=int, default=30)
-    ap.add_argument("--fee-bps", dest="fee_bps", type=float, default=30.0)
-    ap.add_argument("--slippage-bps", dest="slippage_bps", type=float, default=50.0)
+    ap.add_argument("--fee-bps", dest="fee_bps", type=float, default=40.0)
+    ap.add_argument("--slippage-bps", dest="slippage_bps", type=float, default=20.0)
     # discovery safety thresholds -- mirrors config/discovery.yaml
-    ap.add_argument("--min-liquidity-usd", dest="min_liquidity_usd", type=float, default=250_000)
-    ap.add_argument("--min-holder-count", dest="min_holder_count", type=int, default=500)
-    ap.add_argument("--min-organic-score", dest="min_organic_score", type=float, default=40)
-    ap.add_argument("--min-pool-age-hours", dest="min_pool_age_hours", type=float, default=72)
-    ap.add_argument("--max-top-holder-pct", dest="max_top_holder_pct", type=float, default=20.0)
-    ap.add_argument("--blue-chip-mcap-usd", dest="blue_chip_mcap_usd", type=float, default=50_000_000)
-    ap.add_argument("--blue-chip-holder-count", dest="blue_chip_holder_count", type=int, default=10_000)
-    ap.add_argument("--established-mcap-usd", dest="established_mcap_usd", type=float, default=5_000_000)
-    ap.add_argument("--established-holder-count", dest="established_holder_count", type=int, default=2_000)
+    ap.add_argument("--min-24h-quote-volume-usd", dest="min_24h_quote_volume_usd", type=float, default=500_000)
+    ap.add_argument("--max-spread-bps", dest="max_spread_bps", type=float, default=50)
+    ap.add_argument("--blue-chip-min-volume-usd", dest="blue_chip_min_volume_usd", type=float, default=100_000_000)
+    ap.add_argument("--blue-chip-max-spread-bps", dest="blue_chip_max_spread_bps", type=float, default=10)
+    ap.add_argument("--established-min-volume-usd", dest="established_min_volume_usd", type=float, default=10_000_000)
+    ap.add_argument("--established-max-spread-bps", dest="established_max_spread_bps", type=float, default=25)
     args = ap.parse_args()
     run_cycle(args)
 

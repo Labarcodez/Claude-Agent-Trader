@@ -1,8 +1,8 @@
 {
   "mcpServers": {
-    "phantom": {
-      "command": "npx",
-      "args": ["-y", "@phantom/mcp-server@latest"]
+    "kraken": {
+      "command": "kraken",
+      "args": ["mcp", "-s", "market,account,trade,paper,workspace,earn"]
     }
   }
 }

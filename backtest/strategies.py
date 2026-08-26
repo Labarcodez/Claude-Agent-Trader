@@ -8,8 +8,8 @@ across calls; the engine creates a fresh dict per backtest run.
 
 These are intentionally simple and are meant as a *starting point* for the
 agent's real strategy, validated by backtesting before being trusted with the
-live $50 account. See docs/STRATEGY.md for the reasoning behind each one and
-for how to extend this file safely.
+live Kraken account. See docs/STRATEGY.md for the reasoning behind each one
+and for how to extend this file safely.
 """
 from __future__ import annotations
 import statistics as stats

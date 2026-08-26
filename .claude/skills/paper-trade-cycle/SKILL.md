@@ -1,6 +1,6 @@
 ---
 name: paper-trade-cycle
-description: Run one simulated (paper) trading cycle -- the same discovery, regime filter, strategy, and risk logic as trade-cycle, but against a simulated portfolio instead of the real Phantom wallet. No Phantom MCP connection required. Use to validate the pipeline, build a track record before trusting it with real money, or whenever the user asks to paper trade, dry-run, or simulate a trading cycle.
+description: Run one simulated (paper) trading cycle -- the same discovery, regime filter, strategy, and risk logic as trade-cycle, but against a simulated portfolio instead of the real Kraken account. No Kraken MCP connection or API key required. Use to validate the pipeline, build a track record before trusting it with real money, or whenever the user asks to paper trade, dry-run, or simulate a trading cycle.
 ---
 
 # Paper trade cycle
@@ -8,10 +8,26 @@ description: Run one simulated (paper) trading cycle -- the same discovery, regi
 Runs `paper_trading/run_paper_cycle.py`, which reuses the exact same
 discovery (`research/discover_candidates.py`) and strategy
 (`backtest/strategies.py`) code the live `trade-cycle` skill is documented
-to use, against real live market data -- but simulates fills against a
-local paper portfolio (`state/paper_portfolio.json`) instead of calling any
-Phantom MCP write tool. This works in ANY session, including one with no
-Phantom MCP connection at all, since it only reads public market data.
+to use, against real live Kraken market data -- but simulates fills against
+a local paper portfolio (`state/paper_portfolio.json`) instead of calling
+any Kraken MCP trade tool. This works in ANY session that can reach Kraken's
+public REST endpoints (`api.kraken.com`), since it only reads public market
+data -- no API key, no MCP server, no account needed.
+
+**Note:** if this session's network egress policy blocks `api.kraken.com`
+(some cloud/remote environments do -- see `.claude/skills/trade-cycle`'s
+step 0), this script will fail to fetch data the same way the live skill
+would, even though no account is involved. That's a network-policy
+limitation, not a live-trading-specific one -- say so plainly rather than
+fabricating a cycle result.
+
+Kraken CLI (kraken-cli) also ships its own built-in paper trading engine
+(`kraken workspace create ... --mode paper`, `kraken paper buy/sell`), which
+simulates real order mechanics against Kraken's live order book. That's a
+complementary, lower-level check on order execution itself; this script is
+the higher-level pipeline validator for the discovery → regime → strategy →
+sizing → risk chain the live skill actually runs on top of. Using both
+before trusting the system live is reasonable, not redundant.
 
 ## When to use this instead of `trade-cycle`
 
@@ -20,9 +36,9 @@ Phantom MCP connection at all, since it only reads public market data.
   fills) behave against live data with zero financial risk.
 - To build a track record over days/weeks (run repeatedly via `/loop`) and
   decide, from real results, whether the strategy/thresholds are worth
-  trusting with the real $50.
-- Any time Phantom MCP isn't connected (e.g. this cloud/remote session) but
-  someone wants to see the decision-making work anyway.
+  trusting with real money.
+- Any time a Kraken MCP account connection isn't set up (e.g. no API key
+  configured yet) but someone wants to see the decision-making work anyway.
 
 ## Running it
 
@@ -31,16 +47,18 @@ python3 paper_trading/run_paper_cycle.py
 ```
 
 First run auto-creates `state/paper_portfolio.json` at the starting capital
-in `config/risk.yaml` (default $50, override with `--starting-capital-usd`).
+in `config/risk.yaml`'s spirit (default $500, override with
+`--starting-capital-usd` -- there's no fixed/required amount for real
+trading either, this default is just a reasonable "small account" example).
 Subsequent runs continue from that state. Use `--reset` to wipe it and start
 over (e.g. after changing strategy or risk parameters, so old paper results
 don't mix with new ones).
 
 Read `paper_trading/run_paper_cycle.py`'s module docstring for the specific
-ways it simplifies vs. live trading (no real swap quote/slippage check, no
-daily trade-count/volume cadence caps) before treating its results as a
-precise forecast of live behavior -- it's a pipeline validator, not a perfect
-simulator.
+ways it simplifies vs. live trading (no real order-book depth check, no
+daily trade-count/volume cadence caps, no Earn/idle-cash yield simulation)
+before treating its results as a precise forecast of live behavior -- it's a
+pipeline validator, not a perfect simulator.
 
 ## After running
 

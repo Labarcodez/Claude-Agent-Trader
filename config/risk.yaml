@@ -1,8 +1,8 @@
 # Risk configuration for the autonomous trading agent.
 # The trade-cycle skill MUST read this file first, every cycle, before doing
 # anything else. If `enabled: false`, or the circuit breaker has tripped, the
-# skill halts immediately and does not call any Phantom MCP write tool
-# (buy_token, transfer_tokens, send_solana_transaction, portfolio_rebalance).
+# skill halts immediately and does not call any dangerous Kraken MCP tool
+# (order buy/sell/cancel-all, withdraw, wallet-transfer, earn allocate/deallocate).
 
 # ---- Kill switch -----------------------------------------------------------
 # Flip this to false (or delete the file) to stop all autonomous trading.
@@ -10,36 +10,48 @@
 enabled: true
 
 # ---- Capital ----------------------------------------------------------------
-# There is no fixed minimum or required amount -- fund the wallet with
+# There is no fixed minimum or required amount -- fund the Kraken account with
 # whatever you actually intend to risk. starting_capital_usd is auto-detected
-# from the wallet's real balance the first time trade-cycle runs (see
+# from the account's real balance the first time trade-cycle runs (see
 # .claude/skills/trade-cycle/SKILL.md step 2) and persisted to
 # state/starting_capital.json so later P&L swings don't reset the baseline.
 # Leave this null -- every dollar cap below (max_position_usd,
 # circuit_breaker_floor_usd, max_daily_volume_usd) is computed as a
 # percentage of whatever that turns out to be (see each field's *_pct
-# sibling), not hardcoded to any specific number like $50.
+# sibling), not hardcoded to any specific number.
 starting_capital_usd: null
-network: "solana:mainnet"
+exchange: "kraken"
+default_quote_currency: "USD"   # see config/discovery.yaml's allowed_quote_currencies for the full accepted set
 
 # ---- Asset classes in scope --------------------------------------------------
-# Solana spot only for now. EVM spot and Hyperliquid perps are intentionally
-# NOT enabled yet (deliberate scope decision -- revisit later).
+# Kraken spot only by default. Margin and perpetual futures are available on
+# Kraken (spot margin up to ~5-10x on many pairs; Kraken Futures/Perps up to
+# 50x) but are deliberately NOT enabled -- leverage multiplies both edge and
+# liquidation risk, and this project's whole risk model (position sizing,
+# circuit breaker, portfolio heat) is built and validated for unleveraged
+# spot. Revisit only after the spot strategy has a real live track record.
+# kraken_earn (staking/yield on idle balances) IS enabled by default --
+# unlike margin/futures, it adds no price or leverage risk to what's already
+# held; see "Idle-capital yield" below for the liquidity rule that keeps it
+# from conflicting with the circuit breaker.
 asset_classes:
-  solana_spot: {enabled: true}
-  evm_spot: {enabled: false}
-  hyperliquid_perps: {enabled: false}
+  kraken_spot: {enabled: true}
+  kraken_margin: {enabled: false}
+  kraken_futures_perps: {enabled: false}
+  kraken_earn: {enabled: true, flexible_only: true}   # flexible_only: true is load-bearing, see "Idle-capital yield" below
 
 # ---- Position sizing ---------------------------------------------------------
-# Small accounts lose an outsized share of capital to swap fees + price impact
-# if they split into too many tiny trades. Prefer fewer, higher-conviction
-# positions, sized as a fraction of *current* portfolio value with a hard $
-# cap, and scaled by realized volatility (see below) so a calm blue-chip and a
-# wild meme coin aren't sized as if they carried equal risk.
+# Small accounts lose an outsized share of capital to taker fees + spread if
+# they split into too many tiny trades -- more so on a CEX with an explicit
+# maker/taker fee schedule than the near-zero DEX routing this project
+# originally assumed. Prefer fewer, higher-conviction positions, sized as a
+# fraction of *current* portfolio value with a hard $ cap, and scaled by
+# realized volatility (see below) so a calm blue-chip and a wild small-cap
+# aren't sized as if they carried equal risk.
 max_position_fraction: 0.30      # a single position may be at most 30% of current portfolio value
 max_position_usd: null           # computed = starting_capital_usd * max_position_usd_pct (see trade-cycle SKILL.md step 2); hard $ cap regardless of fraction
 max_position_usd_pct: 0.40       # cap = 40% of actual starting capital, whatever that turns out to be (guards against growth making sizes too big too fast)
-min_trade_usd: 5                 # don't bother trading below this; fees dominate -- fixed regardless of account size
+min_trade_usd: 10                # don't bother trading below this; fees dominate -- fixed regardless of account size. Also check the pair's own Kraken `ordermin`/`costmin` (from AssetPairs) at execution time, which varies per pair and can itself exceed this floor
 max_concurrent_positions: 3
 
 # Volatility-scaled sizing: scale the base position size up/down against a
@@ -63,22 +75,35 @@ max_portfolio_heat_pct: 0.12
 max_daily_trade_count: 6
 max_daily_volume_usd: null       # computed = starting_capital_usd * max_daily_volume_usd_pct
 max_daily_volume_usd_pct: 0.80   # 80% of actual starting capital
-min_hours_between_trades_same_token: 4
+min_hours_between_trades_same_pair: 4
 
 # ---- Execution quality --------------------------------------------------------
-max_slippage_bps: 100            # 1.0% max slippage on any swap
-min_liquidity_usd: 250000        # never trade a token with less on-chain liquidity than this
-max_price_impact_bps: 150        # abort if the quoted price impact exceeds this
+# Kraken's maker/taker fee schedule starts at 0.25%/0.40% on the lowest
+# (Starter) volume tier and improves with 30-day volume -- fees this project
+# should assume are real, not "near zero" the way the original DEX-routed
+# version could. Prefer limit (maker) orders over market (taker) orders on
+# entries whenever the strategy signal isn't time-critical, to capture the
+# ~15bps maker/taker differential; see docs/STRATEGY.md "Fee-aware execution".
+prefer_maker_orders: true
+max_taker_fee_bps: 40            # matches Kraken's lowest-tier taker fee; re-check kraken volume/fees against your account's actual current tier
+max_slippage_bps: 50             # abort a market order if the fill would be worse than this vs. the last quoted price
+min_orderbook_depth_usd: 20000   # required resting size within max_slippage_bps of the mid price (both sides) before sizing a market order against it -- see `kraken orderbook`
+max_spread_bps: 50               # matches config/discovery.yaml's safety.max_spread_bps -- re-verify live at execution time, not just from the last discovery pass
 
 # ---- Stop loss / take profit (per position) ----------------------------------
 stop_loss_pct: 0.15              # exit a position down 15% from entry
 take_profit_pct: 0.35            # take profit at +35% from entry
 trailing_stop_pct: 0.12          # once in profit, trail a stop 12% below the peak
+# Kraken supports native stop-loss / take-profit / trailing-stop order types
+# (including stop-loss-limit / take-profit-limit variants) -- prefer placing
+# these as real resting orders on Kraken rather than only checking them in
+# software each cycle, so protection survives even if a trade-cycle run is
+# ever missed or delayed. See .claude/skills/trade-cycle/SKILL.md step 8.
 
 # ---- Circuit breaker (portfolio-level) ----------------------------------------
-# If total portfolio value (SOL + all token positions, mark-to-market in USD)
-# falls to or below this floor, the agent must trip the breaker: sell down to
-# stables/SOL is NOT automatic (avoid panic-selling into a wick), but all new
+# If total portfolio value (USD/USDT cash + all open positions, mark-to-market
+# in USD) falls to or below this floor, the agent must trip the breaker: sell
+# down to cash is NOT automatic (avoid panic-selling into a wick), but all new
 # entries stop and the human must be notified. Record the trip in
 # state/circuit_breaker.json and refuse to trade until enabled is toggled off
 # and back on by a human AND the breaker file is cleared.
@@ -93,24 +118,44 @@ circuit_breaker_daily_loss_pct: 0.25   # or a >25% drawdown in a single UTC day
 # the regime filter. See backtest/strategies.py's regime() for the same idea
 # applied per-asset (used by the adaptive_ensemble strategy).
 regime_filter_enabled: true
-regime_reference_coin: "bitcoin"
+regime_reference_pair: "XBTUSD"   # Kraken's BTC/USD pair (altname) -- see config/core_assets.yaml for why BTC isn't hardcoded as a core/settlement asset
 regime_sma_window_days: 30
 
 # ---- Correlation / concentration guardrails ---------------------------------------
-max_non_stable_exposure_fraction: 0.70   # keep some USDC buffer at all times
-max_emerging_tier_positions: 2           # "emerging" tier includes memecoins -- in scope, capped for correlated-liquidity-loss risk, not on principle
-max_same_ecosystem_positions: 3          # e.g. don't hold 3 different tokens that all just track the same underlying beta
+max_non_stable_exposure_fraction: 0.70   # keep some USD/USDT buffer at all times
+max_emerging_tier_positions: 2           # "emerging" tier includes small/mid-cap alts -- in scope, capped for correlated-liquidity-loss risk, not on principle
+max_same_ecosystem_positions: 3          # e.g. don't hold 3 different tokens that all just track the same underlying beta (L1s, the same DeFi sector, etc.)
 
-# ---- Token discovery & safety gate ----------------------------------------------
-# There is no hand-maintained token list. A token is only ever tradeable if:
-#   (a) it's SOL or USDC (config/core_assets.yaml), OR
+# ---- Pair discovery & safety gate ----------------------------------------------
+# There is no hand-maintained pair list. A pair is only ever tradeable if:
+#   (a) it's a settlement asset (config/core_assets.yaml -- USD/USDT are held
+#       as cash, never traded against each other), OR
 #   (b) it was returned as `"eligible": true` by the most recent
 #       research/discover_candidates.py run (see config/discovery.yaml for the
-#       thresholds it enforces -- liquidity, holder count, organic trading
-#       volume, mint/freeze authority, pool age, RugCheck rug-history check),
-#       AND it is not on config/discovery.yaml's `denylist`.
+#       thresholds it enforces -- 24h quote volume, bid/ask spread, Kraken
+#       listing status), AND it is not on config/discovery.yaml's `denylist`.
 # New candidates that fail discovery are logged as rejected (with the
 # specific reason) in the journal, never traded. See docs/STRATEGY.md
-# "Autonomous discovery" for the full reasoning and a real worked example.
+# "Autonomous discovery" for the full reasoning.
 require_discovery_pass: true
 max_discovery_result_age_hours: 6   # re-run discovery if the latest research/results/discovery_*.json is older than this
+
+# ---- Idle-capital yield (Kraken Earn) ----------------------------------------
+# When cash is sitting idle between trades (no open positions, or the regime
+# filter is blocking new entries), it earns literally 0% just sitting in the
+# balance -- Kraken's Earn program can put it to work. This is a genuine
+# "make more money" lever this project's original Solana version didn't have
+# (Phantom/Jupiter has no equivalent native yield product).
+#
+# flexible_only: true (asset_classes.kraken_earn above) is a hard rule, not a
+# preference: ONLY allocate to Kraken's *flexible* Earn products (unstake any
+# time, no unbonding wait) -- NEVER "Bonded Earn" or any product with an
+# on-chain unbonding period (these run 3-28+ days depending on the asset).
+# The circuit breaker and stop-losses assume capital can reach cash within
+# one cycle; bonded/locked capital cannot, which would silently defeat both.
+# Only allocate cash genuinely not needed for `min_trade_usd`-sized entries
+# in the near term, and always deallocate before a withdrawal or a circuit
+# breaker response. See docs/STRATEGY.md "Idle-capital yield" and
+# .claude/skills/trade-cycle/SKILL.md step 9.
+earn_allocate_idle_cash_above_usd: null   # computed = starting_capital_usd * earn_allocate_idle_cash_above_usd_pct -- cash above this stays liquid, unallocated, as trade-ready buffer
+earn_allocate_idle_cash_above_usd_pct: 0.20

@@ -1,74 +1,100 @@
-# Dynamic token discovery pipeline. This REPLACES a hand-maintained token
-# list: every trade-cycle, the agent asks live data sources "what's worth
-# looking at right now" and runs every candidate through automated,
-# on-chain-backed safety checks before it's ever eligible to trade -- no
-# human has to add a token by name first. Two exceptions: `pinned_candidates`
-# (always considered) and `denylist` (never traded, no matter what).
+# Dynamic pair discovery pipeline. This REPLACES a hand-maintained token
+# list: every trade-cycle, the agent asks Kraken's own public market data
+# "what's actually worth trading right now" and runs every candidate pair
+# through automated liquidity/spread/listing-status checks before it's ever
+# eligible to trade -- no human has to add a pair by name first. Two
+# exceptions: `pinned_candidates` (always considered) and `denylist` (never
+# traded, no matter what).
+#
+# Unlike the project's original Solana/Jupiter version, there is no on-chain
+# rug-pull surface to check here -- every Kraken-listed pair has already
+# gone through Kraken's own listing/compliance review, which is the trust
+# anchor. What still needs live, per-cycle checking is liquidity (24h quote
+# volume) and execution quality (bid/ask spread), because both move fast and
+# a pair that was liquid last week can thin out well before Kraken ever
+# delists it.
 #
 # Reference implementation: research/discover_candidates.py -- this file's
 # `safety` and `tiers` values should match that script's CLI defaults, AND
 # the same defaults duplicated in paper_trading/run_paper_cycle.py and
 # backtest/backtest_all.py (all three mirror this file rather than parsing
 # it, to stay dependency-free -- see research/discover_candidates.py's
-# docstring). Change one, change all four. Reasoning and a real worked
-# example (live run output, including why it rejected USDT and several
-# memecoins) are in docs/STRATEGY.md "Autonomous discovery".
+# docstring). Change one, change all four. Reasoning is in
+# docs/STRATEGY.md "Autonomous discovery".
 
 enabled: true
 
 sources:
-  jupiter_top_organic_score:
+  kraken_asset_pairs:
     enabled: true
-    intervals: ["6h", "24h"]     # "organic" = filtered for wash-traded/bot volume, i.e. real trader interest
-    limit_per_interval: 15
-  jupiter_top_trending:
+    # https://api.kraken.com/0/public/AssetPairs -- every tradable pair
+    # Kraken lists, with status, quote currency, leverage availability, and
+    # order-size minimums. No key required.
+    endpoint: "https://api.kraken.com/0/public/AssetPairs"
+  kraken_ticker:
     enabled: true
-    intervals: ["1h", "6h"]
-    limit_per_interval: 15
-  jupiter_recent:
-    enabled: true
-    limit: 15                    # newest pools -- highest-risk source; the pool-age gate below is what keeps this safe to include
+    # https://api.kraken.com/0/public/Ticker -- 24h volume/vwap/spread per
+    # pair, batched in groups (see research/discover_candidates.py's
+    # TICKER_BATCH_SIZE) to keep individual requests small and be a good
+    # citizen to a shared public endpoint even though Kraken's own published
+    # rate limits are generous for public/market-data calls.
+    endpoint: "https://api.kraken.com/0/public/Ticker"
 
-# Widened from 20 -- with the old cap, real eligible candidates (e.g. a live
-# run that found VINE/TripleT eligible) were sitting past position #15,
-# outside paper_trading's old max-candidates default of 15 -- so breadth was
-# the limiting factor, not safety. 40 doubles evaluation depth while staying
-# well inside "be a good citizen to free public APIs" territory (RugCheck is
-# only spent on stage-1 survivors, per research/discover_candidates.py).
-max_candidates_per_cycle: 40
+# Only pairs quoted in one of these currencies are considered -- keeps the
+# universe to USD-settled trading (directly or via the most liquid dollar
+# stablecoin) and avoids FX-cross pairs (EURUSD-style) and thin exotic-quote
+# pairs the sizing/risk math below isn't built to reason about.
+allowed_quote_currencies: ["USD", "USDT", "USDC"]
 
-# Always considered as candidates regardless of whether live discovery
-# surfaces them this cycle. Use this for a token you specifically want kept
-# in rotation (still has to pass every safety check below every time -- this
-# is not a bypass) and for any open position, so it never "falls off" and
-# becomes impossible for the agent to reason about exiting.
-pinned_candidates: []   # e.g. ["JUPyiwrYJFskUPiHa7hkeR8VUtAeFoSYbKedZNsDvCN"]
+# Kraken's own pair `status` field. Only "online" pairs are ever eligible --
+# cancel_only/post_only/limit_only/reduce_only/delisted/maintenance pairs are
+# excluded outright (see research/discover_candidates.py's STATUS handling
+# for what each of those actually means).
+required_pair_status: "online"
 
-# Tokens that must NEVER be traded even if they'd otherwise pass every
+# Symbol-suffix denylist pattern for leveraged/ETP-style tokens (e.g. a
+# "BTC3L"/"ETH3S"-style 3x-long/3x-short product some exchanges list). These
+# decay from daily rebalancing and are not a spot position in the underlying
+# asset the strategies/backtests in this repo are validated against -- treat
+# them as a different, out-of-scope instrument entirely, not just a
+# higher-risk tier. Matched against the pair's base-asset altname.
+leveraged_token_denylist_pattern: "(2L|2S|3L|3S|4L|4S|5L|5S)$"
+
+# Cap on how many pairs get fully evaluated (ticker fetch + eligibility
+# check) per cycle -- Kraken lists 1,400+ pairs; most are thin/illiquid and
+# not worth spending a cycle's evaluation budget on. Candidates are ranked by
+# each source's own ordering before the cap is applied (see
+# research/discover_candidates.py).
+max_candidates_per_cycle: 60
+
+# Always considered as candidates regardless of what this cycle's ranked
+# scan surfaces. Use this for a pair you specifically want kept in rotation
+# (still has to pass every safety check below every time -- this is not a
+# bypass) and for any open position, so it never "falls off" and becomes
+# impossible for the agent to reason about exiting. Use Kraken's `altname`
+# (e.g. "XBTUSD", "ETHUSD", "SOLUSD") -- see research/discover_candidates.py.
+pinned_candidates: []   # e.g. ["XBTUSD", "ETHUSD"]
+
+# Pairs that must NEVER be traded even if they'd otherwise pass every
 # automated check -- a manual override for anything you have specific reason
-# to distrust (e.g. a token that later turns out to be a rug the automated
-# checks didn't catch, or a token you just don't want the agent touching).
+# to distrust or exclude.
 denylist: []
 
 # ---- Automated safety thresholds (ALL must pass; mirrors the script's
 # argparse defaults) ---------------------------------------------------------
 safety:
-  min_liquidity_usd: 250000
-  min_holder_count: 500
-  min_organic_score: 40          # Jupiter's own organicScore (0-100ish); below this, volume looks bot/wash-traded rather than real demand
-  min_pool_age_hours: 72         # reject anything with a pool younger than 3 days -- the highest-risk rug window
-  max_top_holder_pct: 20.0       # single largest non-team holder's share of supply, from Jupiter's audit.topHoldersPercentage
-  require_mint_authority_disabled: true    # Jupiter's audit.mintAuthorityDisabled must be true
-  require_freeze_authority_disabled: true  # Jupiter's audit.freezeAuthorityDisabled must be true
-  require_rugcheck_not_rugged: true        # cross-check via RugCheck.xyz -- the one thing Jupiter's own data doesn't cover
-  reject_rugcheck_danger_risks: true       # any RugCheck risk flag at danger/critical/high level is disqualifying
+  min_24h_quote_volume_usd: 500000   # 24h volume in USD terms (base_volume * 24h vwap); below this, spreads and slippage get unpredictable fast
+  max_spread_bps: 50                 # 0.50% bid/ask spread cap; majors trade far tighter, this is the floor for anything eligible at all
+  min_price_usd: 0.000001            # reject a zero/negative/unparseable last price outright (data-quality guard, not a real trading threshold)
 
-# ---- Risk tiers (computed live from each candidate's own data, never
-# hand-labeled) --------------------------------------------------------------
+# ---- Risk tiers (computed live from each pair's own Kraken market data,
+# never hand-labeled) ---------------------------------------------------------
 # Sizing multipliers apply on top of config/risk.yaml's max_position_fraction
-# etc. "emerging" is the catch-all for anything that passes every safety
-# check above but isn't large/established yet -- this is where memecoins
-# land. They are IN SCOPE, sized smaller for their variance, not excluded.
+# etc. Tiering here uses Kraken's own 24h quote volume and spread as the
+# liquidity/size proxy -- more directly relevant to "can this exchange
+# actually absorb my order size" than an off-exchange market-cap number
+# would be. "emerging" is the catch-all for anything that clears the safety
+# thresholds above but isn't blue_chip/established-liquid yet.
 #
 # Position-COUNT caps (as opposed to sizing multipliers) live entirely in
 # config/risk.yaml (max_concurrent_positions, max_emerging_tier_positions,
@@ -76,13 +102,12 @@ safety:
 # there's exactly one place to look for "how many positions can be open."
 tiers:
   blue_chip:
-    min_mcap_usd: 50000000
-    min_holder_count: 10000
-    require_jupiter_verified: true
+    min_24h_quote_volume_usd: 100000000
+    max_spread_bps: 10
     position_fraction_multiplier: 1.0
   established:
-    min_mcap_usd: 5000000
-    min_holder_count: 2000
+    min_24h_quote_volume_usd: 10000000
+    max_spread_bps: 25
     position_fraction_multiplier: 0.7
   emerging:
     position_fraction_multiplier: 0.4

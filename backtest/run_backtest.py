@@ -3,9 +3,13 @@
 history from fetch_history.py, and save a JSON report to backtest/results/.
 
 Usage:
-    python3 backtest/fetch_history.py --coin solana --days 180
-    python3 backtest/run_backtest.py --coin solana --days 180 --strategy all
-    python3 backtest/run_backtest.py --coin solana --days 180 --strategy adaptive_ensemble --walk-forward
+    python3 backtest/fetch_history.py --pair XBTUSD --days 180
+    python3 backtest/run_backtest.py --coin XBTUSD --days 180 --strategy all
+    python3 backtest/run_backtest.py --coin XBTUSD --days 180 --strategy adaptive_ensemble --walk-forward
+
+Note: --coin here really means "cache key" -- pass whatever key you used
+with fetch_history.py, a Kraken pair altname (--pair) or a CoinGecko coin id
+(--coin) alike. Named --coin for backwards-compatible CLI stability.
 """
 import argparse
 import json
@@ -35,11 +39,11 @@ def _summary_row(name: str, coin: str, days: int, result) -> dict:
 
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument("--coin", required=True, help="CoinGecko coin id (must match a cached file)")
+    ap.add_argument("--coin", required=True, help="Cache key -- a Kraken pair altname (e.g. XBTUSD) or a CoinGecko coin id, whichever you fetched with (must match a cached file)")
     ap.add_argument("--days", type=int, default=180)
     ap.add_argument("--strategy", default="all", choices=list(STRATEGIES) + ["all"])
-    ap.add_argument("--fee-bps", type=float, default=30)
-    ap.add_argument("--slippage-bps", type=float, default=50)
+    ap.add_argument("--fee-bps", type=float, default=40)
+    ap.add_argument("--slippage-bps", type=float, default=20)
     ap.add_argument("--walk-forward", action="store_true",
                      help="Chronological 70/30 train/test split to check for overfitting, instead of one in-sample run.")
     ap.add_argument("--split", type=float, default=0.7)

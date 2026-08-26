@@ -2,8 +2,8 @@ name: tests
 
 # Runs the deterministic unit test suite (tests/) on every push and PR.
 # Deliberately does NOT run backtest/discovery/paper-trading scripts here --
-# those hit real, rate-limited third-party APIs (CoinGecko, Jupiter,
-# RugCheck) and would make CI flaky and non-deterministic. Validate those
+# those hit real, rate-limited third-party APIs (Kraken, CoinGecko) and
+# would make CI flaky and non-deterministic. Validate those
 # manually (see docs/RUNBOOK.md) or by running them yourself locally.
 
 on:

@@ -3,9 +3,16 @@ backtest/cache/
 backtest/results/
 research/results/
 
-# Local Phantom MCP session (wallet session keys) must NEVER be committed
-.phantom-mcp/
+# Kraken credentials belong in environment variables (KRAKEN_API_KEY /
+# KRAKEN_API_SECRET) or kraken-cli's own config file at
+# ~/.config/kraken/config.toml -- outside this repo entirely, never here.
+# These patterns are a defensive backstop in case a config file or key
+# export ever gets copied into the repo by mistake -- must NEVER be committed.
+.kraken/
 *session.json
+config.toml
+*.pem
+*_secret*
 
 # Trade journal is real trading history -- keep it local by default.
 # Remove this line if you deliberately want to version-control your trade log.
@@ -18,7 +25,7 @@ state/paper_portfolio.json
 journal/paper_trades.jsonl
 
 # Live starting-capital baseline -- created by trade-cycle's first real
-# cycle from the wallet's actual funded balance (see config/risk.yaml
+# cycle from the account's actual funded balance (see config/risk.yaml
 # "Capital" and trade-cycle SKILL.md step 2). There's no fixed/shipped
 # value for this (no assumed $ amount), so unlike circuit_breaker.json it
 # has nothing meaningful to track before it exists.
