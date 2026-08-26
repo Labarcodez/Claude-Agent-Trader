@@ -117,9 +117,11 @@ MAX_FRESH_PRICE_HISTORY_FETCHES_PER_CYCLE = 250  # bounds cycle duration when di
                                                   # correctness loss.
 
 TIER_MULTIPLIERS = {"blue_chip": 1.0, "established": 0.7, "emerging": 0.4, "scout": 0.4}
-MEMECOIN_TIERS = {"scout", "emerging"}  # what counts toward max_memecoin_exposure_fraction (naming kept for
-                                          # continuity with config/risk.yaml's max_memecoin_exposure_fraction --
-                                          # on Kraken this means "low-cap/low-volume", not literally memecoins)
+MEMECOIN_TIERS = {"scout", "emerging"}  # what counts toward --max-memecoin-exposure-fraction. Naming predates
+                                          # the Kraken migration and config/risk.yaml no longer has a field by
+                                          # this name -- on Kraken this means "low-cap/low-volume", not literally
+                                          # memecoins, and this whole cap is a paper-trading-only concept (like
+                                          # the "scout" tier itself), not yet formalized in risk.yaml/trade-cycle.
 
 
 # ---- State ------------------------------------------------------------------
@@ -861,7 +863,10 @@ def scout_disco_args(args) -> argparse.Namespace:
 def main():
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--reset", action="store_true", help="Wipe paper state and restart at --starting-capital-usd")
-    ap.add_argument("--starting-capital-usd", type=float, default=50.0)
+    ap.add_argument("--starting-capital-usd", type=float, default=100.0,
+                     help="Only takes effect on --reset (an existing state/paper_portfolio.json keeps its "
+                          "original baseline regardless of this flag's value). Raised from 50.0 to 100.0 "
+                          "2026-08-26 at the user's explicit request.")
     ap.add_argument("--max-candidates", type=int, default=700,
                      help="mirrors config/discovery.yaml's max_candidates_per_cycle -- set comfortably above "
                           "Kraken's current USD-pair count so this is a safety ceiling, not an active truncation.")
@@ -890,9 +895,13 @@ def main():
                           "comparison. This is a paper-trading default change based on real evidence, not yet a "
                           "live-trading recommendation -- CLAUDE.md rule 5 still requires this strategy build its "
                           "own real paper track record (not just a backtest) before it's a candidate for that.")
-    # mirrors config/risk.yaml -- keep in sync by hand
-    ap.add_argument("--max-position-fraction", dest="max_position_fraction", type=float, default=0.30)
-    ap.add_argument("--max-position-usd", dest="max_position_usd", type=float, default=20.0)
+    # mirrors config/risk.yaml -- keep in sync by hand. max_position_fraction/max_position_usd raised
+    # 2026-08-26 (0.30->0.40, $20->$50) alongside risk.yaml's matching bump, at the user's explicit request to
+    # size more aggressively -- $50 = starting_capital_usd(100.0 default above) * risk.yaml's max_position_usd_pct
+    # (0.50), same formula risk.yaml documents for live trading (see trade-cycle SKILL.md step 2); update this by
+    # hand again if either the starting-capital default or that pct ever changes, same as before.
+    ap.add_argument("--max-position-fraction", dest="max_position_fraction", type=float, default=0.40)
+    ap.add_argument("--max-position-usd", dest="max_position_usd", type=float, default=50.0)
     ap.add_argument("--min-trade-usd", dest="min_trade_usd", type=float, default=5.0)
     ap.add_argument("--max-concurrent-positions", dest="max_concurrent_positions", type=int, default=15)
     ap.add_argument("--max-emerging-tier-positions", dest="max_emerging_tier_positions", type=int, default=2)
@@ -936,12 +945,25 @@ def main():
                           "less volume")
     ap.add_argument("--scout-max-spread-bps", dest="scout_max_spread_bps", type=float, default=150.0,
                      help="vs. max-spread-bps's 50 -- still capped well below 'this pair is barely tradable'")
-    ap.add_argument("--scout-position-fraction", dest="scout_position_fraction", type=float, default=0.20)
-    ap.add_argument("--scout-min-trade-usd", dest="scout_min_trade_usd", type=float, default=2.5)
+    ap.add_argument("--scout-position-fraction", dest="scout_position_fraction", type=float, default=0.30,
+                     help="Raised from 0.20 2026-08-26 at the user's explicit request to size more aggressively. "
+                          "In practice --scout-min-trade-usd's floor still dominates most scout sizing at typical "
+                          "portfolio values -- this mostly matters as the portfolio grows.")
+    ap.add_argument("--scout-min-trade-usd", dest="scout_min_trade_usd", type=float, default=5.0,
+                     help="Raised from 2.5 2026-08-26 (matches --min-trade-usd's floor) -- every scout buy so far "
+                          "has landed on this floor (base tier-scaled size before it was well under $2.50), so "
+                          "this is the lever that actually controls scout-tier trade size today, not the fraction "
+                          "above.")
     ap.add_argument("--scale-in-price-threshold-pct", dest="scale_in_price_threshold_pct", type=float, default=0.15)
     ap.add_argument("--profit-take-multiple", dest="profit_take_multiple", type=float, default=2.0)
     ap.add_argument("--max-scout-positions", dest="max_scout_positions", type=int, default=8)
-    ap.add_argument("--max-memecoin-exposure-fraction", dest="max_memecoin_exposure_fraction", type=float, default=0.20)
+    ap.add_argument("--max-memecoin-exposure-fraction", dest="max_memecoin_exposure_fraction", type=float, default=0.40,
+                     help="Raised from 0.20 2026-08-26 at the user's explicit request to size more aggressively. "
+                          "This is the cap that actually governs how many scout positions can coexist in "
+                          "practice -- at the current $5 scout-min-trade-usd floor and $100 starting capital, "
+                          "0.40 allows roughly 8 scout positions before this (not --max-scout-positions) binds, "
+                          "so --max-scout-positions was intentionally left at 8 rather than also raised: raising "
+                          "it further without raising this would have been a no-op.")
     args = ap.parse_args()
     with CycleLock(LOCK_PATH):
         run_cycle(args)

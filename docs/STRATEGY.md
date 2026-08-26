@@ -424,6 +424,31 @@ happens, since crypto correlations move toward 1 in a broad selloff.
 open positions combined, so the worst-case simultaneous-stop-out loss stays
 bounded independent of how many individually-small positions are open.
 
+### 2026-08-26 sizing increase
+
+At the user's explicit request to size more aggressively:
+`max_position_fraction` 0.30->0.40, `max_position_usd_pct` 0.40->0.50 (both
+`config/risk.yaml` and `paper_trading/run_paper_cycle.py`'s CLI defaults,
+kept in sync), plus paper-trading-only `scout_position_fraction` 0.20->0.30,
+`scout_min_trade_usd` 2.5->5.0, and `max_memecoin_exposure_fraction`
+0.20->0.40 (the cap that actually governs how many scout/emerging positions
+can coexist -- raising `max_scout_positions` alone would have been a no-op
+without this, since the exposure cap binds first at the new $5 floor).
+Verified live: a reset cycle at the new $100 starting capital opened 6
+positions across established/emerging/scout tiers (vs. the old $2.50-floor-
+everywhere behavior), sized from $7.20 (scout, vol-scaled up) to $42
+(ETHUSD, established tier) before the exposure cap correctly blocked a 7th.
+
+Found in the process, not yet resolved (a separate decision, not bundled
+into this change): `paper_trading/run_paper_cycle.py`'s
+`--max-concurrent-positions` CLI default is 15, not risk.yaml's documented
+`max_concurrent_positions: 3` -- unlike `max_emerging_tier_positions`
+(which does match), this one drifted from the "keep in sync by hand"
+convention at some point before this session. Paper mode has been running
+more concurrent positions than live trading is configured to allow; this
+doesn't carry forward automatically since risk.yaml's value (not whatever
+paper defaults to) is what would govern a real account.
+
 ### Market regime filter
 
 `regime_filter_enabled` gates **new entries only** (never exits) on whether

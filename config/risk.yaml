@@ -39,9 +39,13 @@ asset_classes:
 # positions, sized as a fraction of *current* portfolio value with a hard $
 # cap, and scaled by realized volatility (see below) so a calm blue-chip and a
 # wild meme coin aren't sized as if they carried equal risk.
-max_position_fraction: 0.30      # a single position may be at most 30% of current portfolio value
+max_position_fraction: 0.40      # a single position may be at most 40% of current portfolio value (raised from
+                                   # 0.30 on 2026-08-26 at the user's explicit request to size more aggressively --
+                                   # see docs/STRATEGY.md "Position sizing philosophy" for the tradeoff)
 max_position_usd: null           # computed = starting_capital_usd * max_position_usd_pct (see trade-cycle SKILL.md step 2); hard $ cap regardless of fraction
-max_position_usd_pct: 0.40       # cap = 40% of actual starting capital, whatever that turns out to be (guards against growth making sizes too big too fast)
+max_position_usd_pct: 0.50       # cap = 50% of actual starting capital, whatever that turns out to be (raised from
+                                   # 0.40 alongside max_position_fraction above -- still guards against growth
+                                   # making sizes too big too fast, just at a higher ceiling)
 min_trade_usd: 5                 # don't bother trading below this; fees dominate -- fixed regardless of account size
 max_concurrent_positions: 3
 
